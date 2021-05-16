@@ -1,10 +1,10 @@
 # NUS Research Program: Dynamic Treatment Regime in Parkinson's Disease
 
-Save some files that needed to share. Code related files are all stored in R_code.
+Save some files that needed to share. Core codes are all in PD_DTR.Rmd. After some days I will also upload my thesis about this project.
 
 ## Data Sources
 
-The data to reproduce the analyses has to be obtained from https://www.ppmi-info.org/ and placed in the raw-data directory.
+The data to reproduce the analyses has to be obtained from https://www.ppmi-info.org/ and placed in the raw-data directory. I suggest you download the whole repository in https://github.com/jkrijthe/pdmed and place PD_DTR.Rmd inside.
 
 ## Acknowledge
 
