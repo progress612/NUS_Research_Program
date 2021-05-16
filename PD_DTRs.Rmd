@@ -1,0 +1,2455 @@
+---
+title: "PD_DTRs"
+output: html_document
+author: Zi-Yi ZHANG
+---
+
+I refered Jesse H. Krijthe's work in PPMI in most data preprocess part, his code can be found here: https://github.com/jkrijthe/pdmed. Some of the model diagnostics code were asked from Prof.Wallace, his personal website: https://mpwallace.github.io/.
+
+## Load Data
+
+```{r}
+## clear
+rm(list=ls())
+setwd("D:/Data_UNIMPORTANT/G/Github/pdmed")
+
+options(tidyverse.quiet = TRUE)
+library(tidyverse)
+library(stringr)
+```
+
+### Fixed Patient Attributes
+
+```{r}
+## UPSIT (we only consider the BL upsit score)
+upsit <- read_csv("raw-data/Non-motor_Assessments/University_of_Pennsylvania_Smell_ID_Test.csv", col_types=
+                    cols(
+                      REC_ID = col_integer(),
+                      F_STATUS = col_character(),
+                      PATNO = col_integer(),
+                      EVENT_ID = col_character(),
+                      PAG_NAME = col_character(),
+                      INFODT = col_character(),
+                      UPSITBK1 = col_integer(),
+                      UPSITBK2 = col_integer(),
+                      UPSITBK3 = col_integer(),
+                      UPSITBK4 = col_integer(),
+                      COMM = col_character(),
+                      ORIG_ENTRY = col_character(),
+                      LAST_UPDATE = col_datetime(format = ""),
+                      QUERY = col_character(),
+                      SITE_APRV = col_character()
+                    )) %>% 
+  select(-REC_ID, -F_STATUS,-PAG_NAME,-INFODT,
+         -ORIG_ENTRY, -LAST_UPDATE, -QUERY,-SITE_APRV) %>% 
+  mutate(UPSIT = UPSITBK1 + UPSITBK2 + UPSITBK3 + UPSITBK4) %>% 
+  select(PATNO,EVENT_ID,UPSIT)
+
+## Subject Characteristics
+socio_econ <- read_csv("raw-data/_Subject_Characteristics/Socio-Economics.csv",
+                       col_types = cols(
+                         REC_ID = col_integer(),
+                         F_STATUS = col_character(),
+                         PATNO = col_integer(),
+                         EVENT_ID = col_character(),
+                         PAG_NAME = col_character(),
+                         INFODT = col_character(),
+                         EDUCYRS = col_integer(),
+                         HANDED = col_integer(),
+                         ORIG_ENTRY = col_character(),
+                         LAST_UPDATE = col_datetime(format = ""),
+                         QUERY = col_character(),
+                         SITE_APRV = col_character()
+                       )) %>% 
+  select(PATNO, Education=EDUCYRS, Handed=HANDED) %>% 
+  mutate(Handed = factor(Handed,levels=1:3,labels=c("Right","Left","Mixed")))
+
+determine_race <- function(df) {
+  determine_row <- function(lt) {
+    lt<-as.list(lt)
+    if (sum(unlist(lt),na.rm=TRUE)>1) {"Other"}
+    else if (!is.na(lt$RAINDALS) & lt$RAINDALS) {"Other"}
+    else if (!is.na(lt$RAHAWOPI) & lt$RAHAWOPI) {"Other"}
+    else if (!is.na(lt$RANOS) & lt$RANOS) {"Other"}
+    else if (!is.na(lt$RAASIAN) & lt$RAASIAN) { "Asian" }
+    else if (!is.na(lt$RABLACK) & lt$RABLACK) { "Black" }
+    else if (!is.na(lt$RAWHITE) & lt$RAWHITE) { "White" }
+    else NA
+  }
+  apply(df,1,determine_row) %>% unlist
+}
+
+screening <- read_csv("raw-data/_Subject_Characteristics/Screening___Demographics.csv",
+                      col_types = cols(
+                        .default = col_integer(),
+                        F_STATUS = col_character(),
+                        EVENT_ID = col_character(),
+                        PAG_NAME = col_character(),
+                        CONSNTDT = col_character(),
+                        RANOSCM = col_character(),
+                        PRJENRDT = col_character(),
+                        REFERRAL = col_character(),
+                        RSNDEC = col_character(),
+                        RSNEXC = col_character(),
+                        ORIG_ENTRY = col_character(),
+                        LAST_UPDATE = col_datetime(format = ""),
+                        QUERY = col_character(),
+                        SITE_APRV = col_character()
+                      )) %>% 
+  select(-REC_ID,-F_STATUS,-EVENT_ID,-PAG_NAME,-SIGNCNST,-RANOSCM,-REFERRAL,
+         -ORIG_ENTRY, -LAST_UPDATE, -QUERY, -SITE_APRV,-PRJENRDT,-BIRTHDT) %>% 
+  mutate(Sex = factor(replace(GENDER,GENDER==1,0),levels=c(0,2),c("Female","Male"))) %>% 
+  mutate(GENDER = factor(GENDER,levels=0:2,c("Female of child bearing potential",
+                                             "Female of non-child bearing potential","Male"))) %>% 
+  mutate(APPRDX = factor(APPRDX),CURRENT_APPRDX=factor(CURRENT_APPRDX)) %>% 
+  mutate_at(vars(HISPLAT:RAWHITE), function(x) {replace(x,x==2,NA)}) %>% 
+  mutate(Race = determine_race(select_(.,"RAINDALS:RANOS")),
+         Race2 = case_when(
+           pmap_int(list(RAINDALS,RAHAWOPI,RANOS,RAASIAN,RABLACK,RAWHITE),sum,na.rm=TRUE) > 1 ~ "Other",
+           RAINDALS==1 | RAHAWOPI==1 | RANOS==1 ~ "Other",
+           RAASIAN==1 ~ "Asian",
+           RABLACK==1 ~ "Black",
+           RAWHITE==1 ~ "White",
+           TRUE ~ NA_character_
+         )
+  )
+
+patient_status <- read_csv("raw-data/_Subject_Characteristics/Patient_Status.csv",col_types=cols(
+  PATNO = col_integer(),
+  RECRUITMENT_CAT = col_character(),
+  IMAGING_CAT = col_character(),
+  ENROLL_DATE = col_character(),
+  ENROLL_CAT = col_character(),
+  ENROLL_STATUS = col_character(),
+  DESCRP_CAT = col_character(),
+  STATUS_DATE = col_character()
+)) %>% 
+  select(-STATUS_DATE)
+
+family_history <- read_csv("raw-data/_Subject_Characteristics/Family_History__PD_.csv", col_types=
+                             cols(
+                               .default = col_integer(),
+                               F_STATUS = col_character(),
+                               EVENT_ID = col_character(),
+                               PAG_NAME = col_character(),
+                               INFODT = col_character(),
+                               ORIG_ENTRY = col_character(),
+                               LAST_UPDATE = col_datetime(format = ""),
+                               QUERY = col_character(),
+                               SITE_APRV = col_character()
+                             )) %>% 
+  group_by(PATNO) %>% 
+  slice(n()) %>% # Use latest measurement
+  select(-REC_ID,-F_STATUS,-PAG_NAME,-INFODT,-ORIG_ENTRY, -LAST_UPDATE, -QUERY, -SITE_APRV) %>% 
+  mutate(BIOMOMPD = ifelse(is.na(BIOMOMPD), 0, BIOMOMPD)) %>%
+  mutate(BIODADPD = ifelse(is.na(BIODADPD), 0, BIODADPD)) %>%
+  mutate(FULSIBPD = ifelse(is.na(FULSIBPD), 0, FULSIBPD)) %>%
+  mutate(HAFSIBPD = ifelse(is.na(HAFSIBPD), 0, HAFSIBPD)) %>%
+  mutate(MAGPARPD = ifelse(is.na(MAGPARPD), 0, MAGPARPD)) %>%
+  mutate(PAGPARPD = ifelse(is.na(PAGPARPD), 0, PAGPARPD)) %>%
+  mutate(MATAUPD = ifelse(is.na(MATAUPD), 0, MATAUPD)) %>%
+  mutate(PATAUPD = ifelse(is.na(PATAUPD), 0, PATAUPD)) %>%
+  mutate(KIDSPD = ifelse(is.na(KIDSPD), 0, KIDSPD)) %>%
+  mutate(`Family history` = (BIOMOMPD + BIODADPD + FULSIBPD + HAFSIBPD + MAGPARPD + PAGPARPD + MATAUPD + PATAUPD + KIDSPD)) %>% 
+  select(PATNO,`Family history`)
+
+## Genetics
+biospec_cat <- read_csv("raw-data/Biospecimen/Current_Biospecimen_Analysis_Results.csv", col_types=
+                          cols(
+                            PATNO = col_integer(),
+                            GENDER = col_character(),
+                            DIAGNOSIS = col_character(),
+                            CLINICAL_EVENT = col_character(),
+                            TYPE = col_character(),
+                            TESTNAME = col_character(),
+                            TESTVALUE = col_character(),
+                            UNITS = col_character(),
+                            RUNDATE = col_date(format = ""),
+                            PROJECTID = col_integer(),
+                            PI_NAME = col_character(),
+                            PI_INSTITUTION = col_character(),
+                            update_stamp = col_datetime(format = "")
+                          )) %>% 
+  filter(is.na(UNITS)) %>% 
+  mutate(TESTNAME=replace(TESTNAME,TESTNAME==toupper("ApoE Genotype"),"ApoE Genotype")) %>% 
+  select(PATNO,TESTNAME,TESTVALUE,RUNDATE) %>%
+  arrange(PATNO,TESTNAME,desc(RUNDATE)) %>% #Some measurements have been repeated 
+  distinct(PATNO,TESTNAME,.keep_all=TRUE) %>%
+  select(-RUNDATE) %>% 
+  spread(TESTNAME,TESTVALUE) %>% 
+  mutate(`ApoE e4 status`=stringr::str_count(`ApoE Genotype`,"e4") %>% 
+           factor(levels=0:2,labels=c("No","Heterozygous","Homozygous")))
+
+## PD Features
+pd_features <- read_csv("raw-data/Medical_History/PD_Features.csv",
+                        col_types=cols(
+                          .default = col_character(),
+                          REC_ID = col_integer(),
+                          PATNO = col_integer(),
+                          SXMO = col_integer(),
+                          SXYEAR = col_integer(),
+                          LAST_UPDATE = col_datetime(format = "")
+                        )) %>% 
+  select(-REC_ID, -F_STATUS,-PAG_NAME,-INFODT,
+         -ORIG_ENTRY, -LAST_UPDATE, -QUERY,-SITE_APRV) %>% 
+  filter(EVENT_ID %in% c("BL","SC")) %>% 
+  select(-EVENT_ID)
+
+random <- read_csv("raw-data/Study_Enrollment/Randomization_table.csv",col_types=cols(
+  REC_ID = col_integer(),
+  F_STATUS = col_character(),
+  PATNO = col_integer(),
+  EVENT_ID = col_character(),
+  PAG_NAME = col_character(),
+  INFODT = col_character(),
+  ENROLLDT = col_character(),
+  BIRTHDT = col_character(),
+  GENDER = col_integer(),
+  CONSNTDT = col_character(),
+  ORIG_ENTRY = col_character(),
+  LAST_UPDATE = col_datetime(format = ""),
+  QUERY = col_character(),
+  SITE_APRV = col_character()
+)) %>% 
+  select(-REC_ID, -F_STATUS,-PAG_NAME,-INFODT,
+         -ORIG_ENTRY, -LAST_UPDATE, -QUERY,-SITE_APRV) %>% 
+  select(PATNO,BIRTHDT)
+
+## Combine
+subject_characteristics <- 
+  Reduce(function(x,y) {full_join(x,y,by="PATNO")},
+       list(patient_status,socio_econ,screening,
+            family_history,biospec_cat,pd_features,random,upsit %>% filter(EVENT_ID=="BL")))
+
+## Derived
+convert_monthyear_num <- function(x) {
+  matches <- str_match(x,"([0-9]*)/([0-9]*)")
+  as.numeric(matches[,3]) + as.numeric(matches[,2])/12
+}
+
+determine_group <- function(apprx,enrolldt) {
+  new <- as.integer(apprx) *!is.na(enrolldt)
+  new <- replace(new,new==5 | new==6, 5)
+  new <- replace(new,new==7 | new==8, 6)
+  factor(new,levels=0:6,labels=c(NA,"PD","Healthy Control","SWEDD","Prodromal","Genetic Cohort","Genetic Subject"))
+}
+
+subject_characteristics <- subject_characteristics %>% 
+  mutate(Age = convert_monthyear_num(ENROLL_DATE) - convert_monthyear_num(BIRTHDT)) %>%
+  mutate(AgeYear = floor(convert_monthyear_num(ENROLL_DATE)) - floor(convert_monthyear_num(BIRTHDT))) %>% 
+  mutate(`Disease duration` = convert_monthyear_num(ENROLL_DATE)-
+                              convert_monthyear_num(PDDXDT)) %>% 
+  mutate(Group = determine_group(APPRDX,ENROLL_DATE))
+```  
+
+### Repeated Measurements
+
+```{r}
+## Motor
+### MDS_UPDRS
+mds_1 <- read_csv("raw-data/Motor___MDS-UPDRS/MDS_UPDRS_Part_I.csv",col_types=cols(
+  REC_ID = col_integer(),
+  F_STATUS = col_character(),
+  PATNO = col_integer(),
+  EVENT_ID = col_character(),
+  PAG_NAME = col_character(),
+  INFODT = col_character(),
+  NUPSOURC = col_integer(),
+  NP1COG = col_integer(),
+  NP1HALL = col_integer(),
+  NP1DPRS = col_integer(),
+  NP1ANXS = col_integer(),
+  NP1APAT = col_integer(),
+  NP1DDS = col_integer(),
+  ORIG_ENTRY = col_character(),
+  LAST_UPDATE = col_datetime(format = ""),
+  QUERY = col_character(),
+  SITE_APRV = col_character()
+)) %>% 
+  select(-REC_ID, -F_STATUS,-PAG_NAME,-INFODT,
+         -ORIG_ENTRY, -LAST_UPDATE, -QUERY,-SITE_APRV,-NUPSOURC)
+
+mds_1 <- read_csv("raw-data/Motor___MDS-UPDRS/MDS_UPDRS_Part_I__Patient_Questionnaire.csv",col_types=
+                    cols(
+                      REC_ID = col_integer(),
+                      F_STATUS = col_character(),
+                      PATNO = col_integer(),
+                      EVENT_ID = col_character(),
+                      PAG_NAME = col_character(),
+                      INFODT = col_character(),
+                      NUPSOURC = col_integer(),
+                      NP1SLPN = col_integer(),
+                      NP1SLPD = col_integer(),
+                      NP1PAIN = col_integer(),
+                      NP1URIN = col_integer(),
+                      NP1CNST = col_integer(),
+                      NP1LTHD = col_integer(),
+                      NP1FATG = col_integer(),
+                      ORIG_ENTRY = col_character(),
+                      LAST_UPDATE = col_datetime(format = ""),
+                      QUERY = col_character(),
+                      SITE_APRV = col_character()
+                    )) %>% 
+  select(-REC_ID, -F_STATUS,-PAG_NAME,-INFODT,
+         -ORIG_ENTRY, -LAST_UPDATE, -QUERY,-SITE_APRV) %>% 
+  left_join(mds_1, by=c("PATNO", "EVENT_ID")) %>% 
+  mutate(MDS_UPDRS_I = NP1COG + NP1HALL + NP1DPRS + NP1ANXS + NP1APAT + NP1DDS + NP1SLPN + NP1SLPD + NP1PAIN + NP1URIN + NP1CNST + NP1LTHD + NP1FATG)
+  
+mds_2 <- read_csv("raw-data/Motor___MDS-UPDRS/MDS_UPDRS_Part_II__Patient_Questionnaire.csv", col_types=
+                    cols(
+                      .default = col_integer(),
+                      F_STATUS = col_character(),
+                      EVENT_ID = col_character(),
+                      PAG_NAME = col_character(),
+                      INFODT = col_character(),
+                      ORIG_ENTRY = col_character(),
+                      LAST_UPDATE = col_datetime(format = ""),
+                      QUERY = col_character(),
+                      SITE_APRV = col_character()
+                    )) %>% 
+  select(-REC_ID, -F_STATUS,-PAG_NAME,-INFODT,
+         -ORIG_ENTRY, -LAST_UPDATE, -QUERY,-SITE_APRV) %>% 
+  mutate(MDS_UPDRS_II = NP2SPCH + NP2SALV + NP2SWAL + NP2EAT + NP2DRES + NP2HYGN + NP2HWRT + NP2HOBB + NP2TURN + NP2TRMR + NP2RISE + NP2WALK + NP2FREZ)
+
+mds_3 <- read_csv("raw-data/Motor___MDS-UPDRS/MDS_UPDRS_Part_III.csv",col_types=
+                    cols(
+                      .default = col_integer(),
+                      F_STATUS = col_character(),
+                      EVENT_ID = col_character(),
+                      PAG_NAME = col_character(),
+                      INFODT = col_character(),
+                      PDMEDDT = col_character(),
+                      PDMEDTM = col_time(format = ""),
+                      EXAMTM = col_time(format = ""),
+                      ANNUAL_TIME_BTW_DOSE_NUPDRS = col_double(),
+                      ORIG_ENTRY = col_character(),
+                      LAST_UPDATE = col_datetime(format = ""),
+                      QUERY = col_character(),
+                      SITE_APRV = col_character()
+                    )) %>% 
+  #select(-REC_ID, -F_STATUS,-PAG_NAME,-INFODT,
+  #         -ORIG_ENTRY, -LAST_UPDATE, -QUERY,-SITE_APRV) %>% 
+  mutate(MDS_UPDRS_III = NP3SPCH + NP3FACXP + NP3RIGN + NP3RIGRU + NP3RIGLU + PN3RIGRL + 
+           NP3RIGLL + NP3FTAPR + NP3FTAPL + NP3HMOVR + NP3HMOVL + NP3PRSPR + NP3PRSPL + 
+           NP3TTAPR + NP3TTAPL + NP3LGAGR + NP3LGAGL + NP3RISNG + NP3GAIT + NP3FRZGT + 
+           NP3PSTBL + NP3POSTR + NP3BRADY + NP3PTRMR + NP3PTRML + NP3KTRMR + NP3KTRML + 
+           NP3RTARU + NP3RTALU + NP3RTARL + NP3RTALL + NP3RTALJ + NP3RTCON)
+
+mds_4 <- read_csv("raw-data/Motor___MDS-UPDRS/MDS_UPDRS_Part_IV.csv",col_types=
+                    cols(
+                      REC_ID = col_integer(),
+                      F_STATUS = col_character(),
+                      PATNO = col_integer(),
+                      EVENT_ID = col_character(),
+                      PAG_NAME = col_character(),
+                      INFODT = col_character(),
+                      NP4WDYSK = col_integer(),
+                      NP4DYSKI = col_integer(),
+                      NP4OFF = col_integer(),
+                      NP4FLCTI = col_integer(),
+                      NP4FLCTX = col_integer(),
+                      NP4DYSTN = col_integer(),
+                      ORIG_ENTRY = col_character(),
+                      LAST_UPDATE = col_datetime(format = ""),
+                      QUERY = col_character(),
+                      SITE_APRV = col_character()
+                    )) %>% 
+  select(-REC_ID, -F_STATUS,-PAG_NAME,-INFODT,
+         -ORIG_ENTRY, -LAST_UPDATE, -QUERY,-SITE_APRV) %>% 
+  mutate(MDS_UPDRS_IV = NP4WDYSK + NP4DYSKI + NP4OFF + NP4FLCTI + NP4FLCTX + NP4DYSTN)
+
+determine_subtype <- function(tremor,pigd) {
+  ratio <- tremor/pigd
+  if (is.na(tremor) | is.na(pigd)) NA
+  else if (pigd==0 & tremor==0) "Indeterminate"
+  else if ((pigd==0 & tremor>0) | ratio>1.15) "TD"
+  else if (ratio<=0.9) "PIGD"
+  else if (is.na(ratio)) NA
+  else "Indeterminate"
+}
+
+# Check calculation of subtype
+mds_measurements <- Reduce(function(x,y) {left_join(x,y,by=c("PATNO","EVENT_ID"))},
+                    list(mds_1,mds_2,mds_3,mds_4)) %>% 
+  mutate(MDS_TOTAL = MDS_UPDRS_I + MDS_UPDRS_II + MDS_UPDRS_III) %>% 
+  mutate(Tremorscore = (NP2TRMR + NP3PTRMR + NP3PTRML + NP3KTRMR + NP3KTRML + 
+                          NP3RTARU + NP3RTALU + NP3RTARL + NP3RTALL + NP3RTALJ + NP3RTCON)/11) %>% 
+  mutate(PIGDscore = (NP2WALK + NP2FREZ + NP3GAIT + NP3FRZGT + NP3PSTBL)/5) %>% 
+  mutate(Subtype = map2_chr(Tremorscore,PIGDscore,determine_subtype)) %>% 
+  mutate(ratio = Tremorscore/PIGDscore) %>%
+  mutate(Subtype2 = case_when(
+    PIGDscore==0 & Tremorscore==0 ~ "Indeterminate",
+    (PIGDscore==0 & Tremorscore>0) | ratio>1.15 ~ "TD",
+    ratio<=0.9 ~ "PIGD",
+    (is.na(Tremorscore) | is.na(PIGDscore)) ~ NA_character_,
+    is.na(ratio) ~ NA_character_,
+    TRUE ~ "Indeterminate"
+  )) %>% 
+  mutate(Month = case_when(
+    EVENT_ID=="SC" ~ -1,
+    EVENT_ID=="BL" ~ 0,
+    EVENT_ID=="V01" ~ 3,
+    EVENT_ID=="V02" ~ 6,
+    EVENT_ID=="V03" ~ 9,
+    EVENT_ID=="V04" ~ 12,
+    EVENT_ID=="V05" ~ 18,
+    EVENT_ID=="V06" ~ 24,
+    EVENT_ID=="V07" ~ 30,
+    EVENT_ID=="V08" ~ 36,
+    EVENT_ID=="V09" ~ 42,
+    EVENT_ID=="V10" ~ 48,
+    EVENT_ID=="V11" ~ 54,
+    EVENT_ID=="V12" ~ 60,
+    TRUE ~ NA_real_
+  )) %>% 
+  mutate(PD_MED_USE=factor(PD_MED_USE,levels=0:7,
+                           labels=c("None","Lv","Ag","Other","Lv+Other","Lv+Ag","Ag+Other","Lv+Ag+Other"))) %>%
+  mutate(ON_OFF_DOSE=factor(ON_OFF_DOSE,levels=1:2,labels=c(">=6hr","<6hr"))) %>% 
+  select(PATNO,EVENT_ID,starts_with("NP1"),starts_with("NP2"),starts_with("NP3"), MDS_TOTAL, MDS_UPDRS_I, 
+         MDS_UPDRS_II, MDS_UPDRS_III, MDS_UPDRS_IV, Subtype, 
+         ANNUAL_TIME_BTW_DOSE_NUPDRS, ON_OFF_DOSE, PD_MED_USE, Month, PAG_NAME, NHY)
+
+mds_total <- mds_measurements %>% 
+  select(PATNO,EVENT_ID,MDS_TOTAL, MDS_UPDRS_I, 
+         MDS_UPDRS_II, MDS_UPDRS_III, MDS_UPDRS_IV, Subtype, 
+         ANNUAL_TIME_BTW_DOSE_NUPDRS, ON_OFF_DOSE, PD_MED_USE, Month, PAG_NAME, NHY)
+
+## MSE-ADL
+modified_schwab <- read_csv("raw-data/Motor___MDS-UPDRS/Modified_Schwab_+_England_ADL.csv",col_types = 
+                              cols(
+                                REC_ID = col_integer(),
+                                F_STATUS = col_character(),
+                                PATNO = col_integer(),
+                                EVENT_ID = col_character(),
+                                PAG_NAME = col_character(),
+                                INFODT = col_character(),
+                                MSEADLG = col_integer(),
+                                ORIG_ENTRY = col_character(),
+                                LAST_UPDATE = col_datetime(format = ""),
+                                QUERY = col_character(),
+                                SITE_APRV = col_character()
+                              )) %>% 
+  select(PATNO, EVENT_ID, MSEADLG)
+
+pase <- read_csv("raw-data/Motor___MDS-UPDRS/PASE_-_Household_Activity.csv",col_types=
+                   cols(
+                     REC_ID = col_integer(),
+                     F_STATUS = col_character(),
+                     PATNO = col_integer(),
+                     EVENT_ID = col_character(),
+                     PAG_NAME = col_character(),
+                     LTHSWRK = col_integer(),
+                     HVYHSWRK = col_integer(),
+                     HMREPR = col_integer(),
+                     LAWNWRK = col_integer(),
+                     OUTGARDN = col_integer(),
+                     CAREGVR = col_integer(),
+                     WRKVL = col_integer(),
+                     WRKVLHR = col_integer(),
+                     WRKVLACT = col_integer(),
+                     ORIG_ENTRY = col_character(),
+                     LAST_UPDATE = col_datetime(format = ""),
+                     QUERY = col_character(),
+                     SITE_APRV = col_datetime(format = "")
+                   ))
+pase %>% count(EVENT_ID)
+```
+
+### Non-motor
+
+```{r}
+### Benton_Judgment_of_Line_Orientation
+# There is one sample that has measurements for both sides
+# Comments state that sometimes the wrong test was applied
+benton <- read_csv("raw-data/Non-motor_Assessments/Benton_Judgment_of_Line_Orientation.csv",col_types=
+                     cols(
+                       .default = col_integer(),
+                       F_STATUS = col_character(),
+                       EVENT_ID = col_character(),
+                       PAG_NAME = col_character(),
+                       INFODT = col_character(),
+                       DVS_JLO_MSSAE = col_double(),
+                       ORIG_ENTRY = col_character(),
+                       LAST_UPDATE = col_datetime(format = ""),
+                       QUERY = col_character(),
+                       SITE_APRV = col_character()
+                     )) %>% 
+  select(-REC_ID, -F_STATUS,-PAG_NAME,-INFODT,
+         -ORIG_ENTRY, -LAST_UPDATE, -QUERY,-SITE_APRV) %>% 
+  mutate(Benton = rowSums(select_(.,"BJLOT1:BJLOT30"),na.rm = TRUE)) %>% 
+  select(PATNO,EVENT_ID,Benton,DVS_JLO_MSSAE,AGE_ASSESS_JLO, DVS_JLO_MSSA)
+
+### GDS
+# Subjects with GDS >=5 are "Depressed".  Subjects with GDS <5 are "Not Depressed".
+geriatricdepression <- read_csv("raw-data/Non-motor_Assessments/Geriatric_Depression_Scale__Short_.csv",col_types=
+                                  cols(
+                                    .default = col_integer(),
+                                    F_STATUS = col_character(),
+                                    EVENT_ID = col_character(),
+                                    PAG_NAME = col_character(),
+                                    INFODT = col_character(),
+                                    ORIG_ENTRY = col_character(),
+                                    LAST_UPDATE = col_datetime(format = ""),
+                                    QUERY = col_character(),
+                                    SITE_APRV = col_character()
+                                  )) %>% 
+  mutate(GDS = (1-GDSSATIS) + GDSDROPD + GDSEMPTY + GDSBORED + (1-GDSGSPIR) + 
+           GDSAFRAD + (1-GDSHAPPY) + GDSHLPLS + GDSHOME + GDSMEMRY +
+           (1-GDSALIVE) + GDSWRTLS + (1-GDSENRGY) + GDSHOPLS + GDSBETER) %>% 
+  select(PATNO,EVENT_ID,GDS)
+
+### Cognitive Categorization
+cognitive_cat <- read_csv("raw-data/Non-motor_Assessments/Cognitive_Categorization.csv",col_types=
+                            cols(
+                              REC_ID = col_integer(),
+                              F_STATUS = col_character(),
+                              PATNO = col_integer(),
+                              EVENT_ID = col_character(),
+                              PAG_NAME = col_character(),
+                              INFODT = col_character(),
+                              PTCGBOTH = col_integer(),
+                              COGDECLN = col_integer(),
+                              FNCDTCOG = col_integer(),
+                              COGSTATE = col_integer(),
+                              COGDXCL = col_integer(),
+                              RVWNPSY = col_integer(),
+                              ORIG_ENTRY = col_character(),
+                              LAST_UPDATE = col_datetime(format = ""),
+                              QUERY = col_character(),
+                              SITE_APRV = col_character()
+                            )) %>% 
+  select(-REC_ID, -F_STATUS,-PAG_NAME,-INFODT,
+         -ORIG_ENTRY, -LAST_UPDATE, -QUERY,-SITE_APRV)
+
+### Epworth Sleepiness Scale
+# Information source also available
+epps <- read_csv("raw-data/Non-motor_Assessments/Epworth_Sleepiness_Scale.csv", col_types=
+                   cols(
+                     REC_ID = col_integer(),
+                     F_STATUS = col_character(),
+                     PATNO = col_integer(),
+                     EVENT_ID = col_character(),
+                     PAG_NAME = col_character(),
+                     INFODT = col_character(),
+                     PTCGBOTH = col_integer(),
+                     ESS1 = col_integer(),
+                     ESS2 = col_integer(),
+                     ESS3 = col_integer(),
+                     ESS4 = col_integer(),
+                     ESS5 = col_integer(),
+                     ESS6 = col_integer(),
+                     ESS7 = col_integer(),
+                     ESS8 = col_integer(),
+                     ORIG_ENTRY = col_character(),
+                     LAST_UPDATE = col_datetime(format = ""),
+                     QUERY = col_character(),
+                     SITE_APRV = col_character()
+                   )) %>% 
+  select(-REC_ID, -F_STATUS,-PAG_NAME,-INFODT,
+         -ORIG_ENTRY, -LAST_UPDATE, -QUERY,-SITE_APRV) %>% 
+  mutate(Epworth = rowSums(select_(.,"ESS1:ESS8"))) %>% 
+  select(PATNO,EVENT_ID,Epworth)
+
+### REM Behaviour Disorder Diagnosis
+# Drop: Very small dataset, not used
+remdiag <- read_csv("raw-data/Non-motor_Assessments/Features_of_REM_Behavior_Disorder.csv",col_types=
+                      cols(
+                        .default = col_integer(),
+                        F_STATUS = col_character(),
+                        EVENT_ID = col_character(),
+                        PAG_NAME = col_character(),
+                        INFODT = col_character(),
+                        REMONSDT = col_character(),
+                        RBDDXDT = col_character(),
+                        COMM = col_character(),
+                        ORIG_ENTRY = col_character(),
+                        LAST_UPDATE = col_datetime(format = ""),
+                        QUERY = col_character(),
+                        SITE_APRV = col_character()
+                      )) %>% 
+  select(-REC_ID, -F_STATUS,-PAG_NAME,-INFODT,
+         -ORIG_ENTRY, -LAST_UPDATE, -QUERY,-SITE_APRV)
+
+### Hopkins Verbal Learning Test
+# Drop: the derived measures in the dataset such as Derived-Total Recall T-Score
+hopkins <- read_csv("raw-data/Non-motor_Assessments/Hopkins_Verbal_Learning_Test.csv", col_types=
+                      cols(
+                        .default = col_integer(),
+                        F_STATUS = col_character(),
+                        EVENT_ID = col_character(),
+                        PAG_NAME = col_character(),
+                        INFODT = col_character(),
+                        AGE_ASSESS_HVLT = col_double(),
+                        DVT_TOTAL_RECALL = col_double(),
+                        DVT_DELAYED_RECALL = col_double(),
+                        DVT_RETENTION = col_double(),
+                        DVT_RECOG_DISC_INDEX = col_double(),
+                        ORIG_ENTRY = col_character(),
+                        LAST_UPDATE = col_datetime(format = ""),
+                        QUERY = col_character(),
+                        SITE_APRV = col_character()
+                      )) %>% 
+  select(-REC_ID, -F_STATUS,-PAG_NAME,-INFODT,
+         -ORIG_ENTRY, -LAST_UPDATE, -QUERY,-SITE_APRV) %>% 
+  mutate(TotalRec=HVLTRT1 + HVLTRT2 + HVLTRT3 +HVLTRDLY,
+         `HVLT Immediate/Total Recall` = HVLTRT1 + HVLTRT2 + HVLTRT3,
+         `HVLT Discrimination Recognition` =	HVLTREC - (HVLTFPRL + HVLTFPUN),
+         `HVLT Retention` =	HVLTRDLY / pmax(HVLTRT2, HVLTRT3)) %>%
+  select(PATNO,EVENT_ID,`HVLT Immediate/Total Recall`,
+         `HVLT Discrimination Recognition`,`HVLT Retention`,
+         DVT_TOTAL_RECALL,HVLTVRSN, TotalRec,DVT_DELAYED_RECALL,DVT_RETENTION, 
+         AGE_ASSESS_HVLT, DVT_RECOG_DISC_INDEX,HVLTRDLY,HVLTRT1,HVLTRT2, HVLTRT3)
+
+### Letter Number Sequencing
+lns <- read_csv("raw-data/Non-motor_Assessments/Letter_-_Number_Sequencing__PD_.csv", col_types=
+                  cols(
+                    .default = col_integer(),
+                    F_STATUS = col_character(),
+                    EVENT_ID = col_character(),
+                    PAG_NAME = col_character(),
+                    INFODT = col_character(),
+                    ORIG_ENTRY = col_character(),
+                    LAST_UPDATE = col_datetime(format = ""),
+                    QUERY = col_character(),
+                    SITE_APRV = col_character()
+                  )
+                  ) %>% 
+  select(-REC_ID, -F_STATUS,-PAG_NAME,-INFODT,
+         -ORIG_ENTRY, -LAST_UPDATE, -QUERY,-SITE_APRV) %>% 
+  mutate(LNS = rowSums(select_(.,"LNS1A:LNS7C"),na.rm=TRUE)) %>% 
+  select(PATNO,EVENT_ID,LNS,DVS_LNS,AGE_ASSESS_LNS)
+
+### Montreal Cognitive Assessment
+# If EDUCYRS <=12 and Unadjusted Score < 30, add 1 more point to score.  If EDUCYRS > 12, do not add any more points to score.
+moca <- read_csv("raw-data/Non-motor_Assessments/Montreal_Cognitive_Assessment__MoCA_.csv", col_types=
+                   cols(
+                     .default = col_integer(),
+                     F_STATUS = col_character(),
+                     EVENT_ID = col_character(),
+                     PAG_NAME = col_character(),
+                     INFODT = col_character(),
+                     ORIG_ENTRY = col_character(),
+                     LAST_UPDATE = col_datetime(format = ""),
+                     QUERY = col_character(),
+                     SITE_APRV = col_character()
+                   )) %>% 
+  #select(-REC_ID, -F_STATUS,-PAG_NAME,-INFODT,
+  #       -ORIG_ENTRY, -LAST_UPDATE, -QUERY,-SITE_APRV) %>% 
+  mutate(info_date = lubridate::parse_date_time(INFODT,"m/y")) %>%
+  mutate(original_date = lubridate::parse_date_time(ORIG_ENTRY,"m/y")) %>% 
+  mutate(MOCA_unadjusted = MCAALTTM + MCACUBE + MCACLCKC + MCACLCKN + MCACLCKH + 
+           MCALION +  MCARHINO + MCACAMEL + MCAFDS + MCABDS + MCAVIGIL + 
+           MCASER7 + MCASNTNC + MCAVF + MCAABSTR + MCAREC1 + MCAREC2 + 
+           MCAREC3 + MCAREC4 + MCAREC5 + MCADATE + MCAMONTH + MCAYR + 
+           MCADAY + MCAPLACE + MCACITY) %>% 
+  
+  #filter(info_date<lubridate::parse_date_time("04/2015","m/y")) %>% 
+  #filter(original_date<lubridate::parse_date_time("06/2014","m/y")) %>%
+  left_join(socio_econ, by="PATNO") %>% 
+  mutate(MOCA_adjusted=if_else(Education<=12 & MOCA_unadjusted<30, MOCA_unadjusted+1L, MOCA_unadjusted)) %>% 
+  select(PATNO,EVENT_ID,MOCA_adjusted,MCATOT)
+
+### QUIP
+# Drop medication
+quip <- read_csv("raw-data/Non-motor_Assessments/QUIP_Current_Short.csv", col_types=
+                   cols(
+                     .default = col_integer(),
+                     F_STATUS = col_character(),
+                     EVENT_ID = col_character(),
+                     PAG_NAME = col_character(),
+                     INFODT = col_character(),
+                     TMDISMED = col_character(),
+                     CNTRLDSM = col_character(),
+                     ORIG_ENTRY = col_character(),
+                     LAST_UPDATE = col_datetime(format = ""),
+                     QUERY = col_character(),
+                     SITE_APRV = col_character()
+                   )) %>% 
+  select(-REC_ID, -F_STATUS,-PAG_NAME,-INFODT,
+         -ORIG_ENTRY, -LAST_UPDATE, -QUERY,-SITE_APRV) %>% 
+  mutate(QUIP = (CNTRLGMB | TMGAMBLE) + (CNTRLSEX | TMSEX) + (CNTRLBUY | TMBUY) +
+           (CNTRLEAT|TMEAT) + TMTORACT + TMTMTACT + TMTRWD) %>% 
+  mutate(TMDISMED=parse_integer(TMDISMED,na="N"),
+         CNTRLDSM=parse_integer(CNTRLDSM,na="N")) %>% 
+  mutate(TMDISMED=replace(TMDISMED,is.na(TMDISMED),0L),
+         CNTRLDSM=replace(CNTRLDSM,is.na(CNTRLDSM),0L)) %>% 
+  mutate(QUIP8 = (CNTRLGMB | TMGAMBLE) + (CNTRLSEX | TMSEX) + (CNTRLBUY | TMBUY) +
+           (CNTRLEAT|TMEAT) + (CNTRLDSM|TMDISMED) + TMTORACT + TMTMTACT + TMTRWD) %>% 
+  mutate(QUIPany=QUIP8>0) %>% 
+  select(PATNO,EVENT_ID,QUIP,QUIP8,QUIPany)
+  
+## REM Sleep Behaviour Disorder
+# TODO: unsure about the meaning of the calculation of the score. 
+# Subjects with score >=5 are RBD Positive.  Subjects with score <5 are RBD Negative.
+remsleep <- read_csv("raw-data/Non-motor_Assessments/REM_Sleep_Disorder_Questionnaire.csv",
+                     col_types=cols(
+                       .default = col_integer(),
+                       F_STATUS = col_character(),
+                       EVENT_ID = col_character(),
+                       PAG_NAME = col_character(),
+                       INFODT = col_character(),
+                       CNSOTHCM = col_character(),
+                       ORIG_ENTRY = col_character(),
+                       LAST_UPDATE = col_datetime(format = ""),
+                       QUERY = col_character(),
+                       SITE_APRV = col_character()
+                     )) %>% 
+  select(-REC_ID, -F_STATUS,-PAG_NAME,-INFODT,
+         -LAST_UPDATE, -QUERY,-SITE_APRV) %>% 
+  #filter(!(ORIG_ENTRY %in% c("12/2015", "12/2016"))) %>% 
+  mutate(RBD = DRMVIVID + DRMAGRAC + DRMNOCTB + SLPLMBMV + SLPINJUR + DRMVERBL + 
+           DRMFIGHT + DRMUMV + DRMOBJFL + MVAWAKEN + DRMREMEM + SLPDSTRB +
+           (STROKE |  HETRA |  PARKISM |  RLS |  NARCLPSY |  DEPRS |  EPILEPSY |  BRNINFM |  CNSOTH)) %>% 
+  mutate(RBDSQ = rowSums(select_(.,"DRMVIVID:CNSOTH"))) %>% 
+  select(PATNO,EVENT_ID,RBD,RBDSQ)
+
+### Scopa-AUT
+# Drop: there are more scopa scores than used in the summary
+# Note: NAs are counted as 0 in calculation of SCOPA-AUT
+# SCAU1 - SCAU25.  For questions 1-21 (SCAU1 - SCAU21), add 3 points for each response of "9". Otherwise, add the number of points in response.  For questions 22-25 (SCAU22 - SCAU25), add 0 points for each response of "9". Otherwise, add the number of points in response.
+scopa <- read_csv("raw-data/Non-motor_Assessments/SCOPA-AUT.csv", col_types=
+                    cols(
+                      .default = col_integer(),
+                      F_STATUS = col_character(),
+                      EVENT_ID = col_character(),
+                      PAG_NAME = col_character(),
+                      INFODT = col_character(),
+                      SCAU23AT = col_character(),
+                      SCAU26AT = col_character(),
+                      SCAU26BT = col_character(),
+                      SCAU26CT = col_character(),
+                      SCAU26DT = col_character(),
+                      ORIG_ENTRY = col_character(),
+                      LAST_UPDATE = col_datetime(format = ""),
+                      QUERY = col_character(),
+                      SITE_APRV = col_character()
+                    )) %>% 
+  select(-REC_ID, -F_STATUS,-PAG_NAME,-INFODT,
+         -ORIG_ENTRY, -LAST_UPDATE, -QUERY,-SITE_APRV) %>% 
+  mutate_at(vars(SCAU1:SCAU21),function(x){replace(x,x==9,3)}) %>% 
+  mutate_at(vars(SCAU22:SCAU25),function(x){replace(x,x==9,0)}) %>%
+  mutate_at(vars(SCAU22:SCAU25),function(x){replace(x,is.na(x),0)}) %>%
+  select(-SCAU23A,-SCAU23AT) %>% 
+  mutate(`SCOPA-AUT` = rowSums(select(.,SCAU1:SCAU25))) %>% 
+  select(PATNO,EVENT_ID,`SCOPA-AUT`)
+
+### Semantic Fluency (SFT)
+semanticfluency <- read_csv("raw-data/Non-motor_Assessments/Semantic_Fluency.csv",col_types=
+                              cols(
+                                REC_ID = col_integer(),
+                                F_STATUS = col_character(),
+                                PATNO = col_integer(),
+                                EVENT_ID = col_character(),
+                                PAG_NAME = col_character(),
+                                INFODT = col_character(),
+                                VLTANIM = col_integer(),
+                                VLTVEG = col_integer(),
+                                VLTFRUIT = col_integer(),
+                                AGE_ASSESS_SFTANIM = col_integer(),
+                                DVS_SFTANIM = col_integer(),
+                                DVT_SFTANIM = col_integer(),
+                                ORIG_ENTRY = col_character(),
+                                LAST_UPDATE = col_datetime(format = ""),
+                                QUERY = col_character(),
+                                SITE_APRV = col_character()
+                              )) %>% 
+  select(-REC_ID, -F_STATUS,-PAG_NAME,-INFODT,
+         -ORIG_ENTRY, -LAST_UPDATE, -QUERY,-SITE_APRV) %>% 
+  mutate(SFT = VLTANIM + VLTVEG + VLTFRUIT) %>% 
+  select(PATNO,EVENT_ID,DVS_SFTANIM,DVT_SFTANIM,SFT,AGE_ASSESS_SFTANIM,
+         DVS_SFTANIM,VLTANIM)
+
+### State Trait Anxiety Inventory
+statetrait <- read_csv("raw-data/Non-motor_Assessments/State-Trait_Anxiety_Inventory.csv",col_types=
+                         cols(
+                           .default = col_integer(),
+                           F_STATUS = col_character(),
+                           EVENT_ID = col_character(),
+                           PAG_NAME = col_character(),
+                           INFODT = col_character(),
+                           ORIG_ENTRY = col_character(),
+                           LAST_UPDATE = col_datetime(format = ""),
+                           QUERY = col_character(),
+                           SITE_APRV = col_character()
+                         )) %>% 
+  select(-REC_ID, -F_STATUS,-PAG_NAME,-INFODT,
+         -ORIG_ENTRY, -LAST_UPDATE, -QUERY,-SITE_APRV) %>% 
+  mutate(STAI_trait = STAIAD22 + STAIAD24 + STAIAD25 + STAIAD28 + STAIAD29 + 
+                      STAIAD31 + STAIAD32 + STAIAD35 + STAIAD37 + STAIAD38 + STAIAD40 + 
+                (5-STAIAD21) + (5-STAIAD23) + (5-STAIAD26) + (5-STAIAD27) + (5-STAIAD30) + 
+                (5-STAIAD33) + (5-STAIAD34) + (5-STAIAD36) + (5-STAIAD39)) %>% 
+  mutate(STAI_state = STAIAD3 + STAIAD4 + STAIAD6 + STAIAD7 + STAIAD9 + STAIAD12 + 
+           STAIAD13 + STAIAD14 + STAIAD17 + STAIAD18 + (5-STAIAD1) + (5-STAIAD2) + 
+           (5-STAIAD5) + (5-STAIAD8) + (5-STAIAD10) + (5-STAIAD11) + (5-STAIAD15) + 
+           (5-STAIAD16) + (5-STAIAD19) + (5-STAIAD20)) %>% 
+  mutate(STAI = STAI_state+STAI_trait) %>% 
+  select(PATNO,EVENT_ID,STAI_state,STAI_trait,STAI)
+
+### Symbol Digit Modalities
+sdm <- read_csv("raw-data/Non-motor_Assessments/Symbol_Digit_Modalities.csv",
+                col_types=cols(
+                  REC_ID = col_integer(),
+                  F_STATUS = col_character(),
+                  PATNO = col_integer(),
+                  EVENT_ID = col_character(),
+                  PAG_NAME = col_character(),
+                  INFODT = col_character(),
+                  SDMTOTAL = col_integer(),
+                  SDMTVRSN = col_integer(),
+                  AGE_ASSESS_SDM = col_double(),
+                  DVSD_SDM = col_double(),
+                  DVT_SDM = col_double(),
+                  ORIG_ENTRY = col_character(),
+                  LAST_UPDATE = col_datetime(format = ""),
+                  QUERY = col_character(),
+                  SITE_APRV = col_character()
+                )) %>% 
+  select(-REC_ID, -F_STATUS,-PAG_NAME,-INFODT,
+         -ORIG_ENTRY, -LAST_UPDATE, -QUERY,-SITE_APRV) %>% 
+  select(PATNO,EVENT_ID,DVT_SDM,SDMTOTAL,AGE_ASSESS_SDM,DVSD_SDM,SDMTVRSN)
+
+### Combine
+# NOTE: We consider screening visits as baseline visits here
+non_motor <- 
+  Reduce(function(x,y) {full_join(x %>% mutate(EVENT_ID = replace(EVENT_ID,EVENT_ID=="SC","BL")),y%>% mutate(EVENT_ID = replace(EVENT_ID,EVENT_ID=="SC","BL")),by=c("PATNO","EVENT_ID"))},
+         list(upsit,sdm,statetrait,semanticfluency,scopa,remsleep,quip,
+              moca,lns,hopkins,epps,benton,geriatricdepression,cognitive_cat))
+
+### Derive Mild Cognitive Impairment
+non_motor <- non_motor %>% 
+  mutate(`Cognitive Decline` = COGDECLN &
+           ((DVT_TOTAL_RECALL <=35) + (DVT_RECOG_DISC_INDEX <=35) + (DVS_JLO_MSSAE <=6) + (DVS_LNS <=6) + 
+              (DVT_SFTANIM<= 35) + (DVT_SDM <=35))>1 & !FNCDTCOG) %>% 
+  mutate(`Mild Cognitive Impairment` = 
+           ((DVT_TOTAL_RECALL <=35) + (DVT_RECOG_DISC_INDEX <=35) + (DVS_JLO_MSSAE <=6) + (DVS_LNS <=6) + 
+           (DVT_SFTANIM<= 35) + (DVT_SDM <=35))>1 & !FNCDTCOG) %>% 
+  mutate(`Cognitive Impairment` = COGDECLN &
+           ((DVT_TOTAL_RECALL <=35) + (DVT_RECOG_DISC_INDEX <=35) + (DVS_JLO_MSSAE <=6) + (DVS_LNS <=6) + 
+              (DVT_SFTANIM<= 35) + (DVT_SDM <=35))>1 & FNCDTCOG)
+
+## DaTSCAN
+datscan <- read_csv("raw-data/Imaging/DATScan_Analysis.csv", col_types=
+                      cols(
+                        PATNO = col_integer(),
+                        EVENT_ID = col_character(),
+                        CAUDATE_R = col_double(),
+                        CAUDATE_L = col_double(),
+                        PUTAMEN_R = col_double(),
+                        PUTAMEN_L = col_double()
+                      )) %>% 
+  mutate(`Mean Putamen`=(PUTAMEN_R+PUTAMEN_L)/2,
+         `Mean Caudate`=(CAUDATE_R+CAUDATE_L)/2,
+         `Mean Striatum`=(`Mean Putamen`+`Mean Caudate`)/2,
+         `Count Density Ratio`=`Mean Caudate`/`Mean Putamen`,
+         `Putaminal asymmetry`=pmax(PUTAMEN_L,PUTAMEN_R)/pmin(PUTAMEN_L,PUTAMEN_R),
+         `Caudate asymmetry`=pmax(CAUDATE_L,CAUDATE_R)/pmin(CAUDATE_L,CAUDATE_R)
+  )
+
+datscan_visual <- read_csv("raw-data/Imaging/DaTSCAN_SPECT_Visual_Interpretation_Assessment.csv", col_types=
+                             cols(
+                               PATNO = col_integer(),
+                               VISINTRP = col_character(),
+                               SCANDATE = col_character()
+                             ))
+
+# ## Biospecimen
+# 
+# ### Biospecimen
+# # Drops: below and above threshold become NA
+# # Drop: select the most recent measurements in case of mutiple measurements
+# biospecimen <- read_csv("raw-data/Biospecimen/Current_Biospecimen_Analysis_Results.csv", col_types=
+#                           cols(
+#                             PATNO = col_integer(),
+#                             GENDER = col_character(),
+#                             DIAGNOSIS = col_character(),
+#                             CLINICAL_EVENT = col_character(),
+#                             TYPE = col_character(),
+#                             TESTNAME = col_character(),
+#                             TESTVALUE = col_character(),
+#                             UNITS = col_character(),
+#                             RUNDATE = col_date(format = ""),
+#                             PROJECTID = col_integer(),
+#                             PI_NAME = col_character(),
+#                             PI_INSTITUTION = col_character(),
+#                             update_stamp = col_datetime(format = "")
+#                           )) %>% 
+#   filter(!is.na(UNITS)) %>% 
+#   mutate(TESTVALUE=as.numeric(TESTVALUE)) %>% 
+#   rename(EVENT_ID=CLINICAL_EVENT,Measurement=TESTNAME,Score=TESTVALUE) %>% 
+#   mutate(Measurement = paste(Measurement,UNITS)) %>% 
+#   group_by(PATNO,EVENT_ID,Measurement) %>% 
+#   arrange(RUNDATE) %>% 
+#   filter(row_number()==n()) %>% 
+#   ungroup %>% 
+#   select(PATNO, EVENT_ID,Measurement,Score) %>% 
+#   spread(Measurement,Score)
+  
+
+# ### Blood Chemistry
+# # Drop: Introduces some NA when character description of problem with measurement is given
+# # Drop: When multiple measurements as available
+# blood <- read_csv("raw-data/Biospecimen/Blood_Chemistry___Hematology.csv",col_types=
+#                     cols(
+#                       .default = col_character(),
+#                       PATNO = col_integer(),
+#                       COLLTM = col_time(format = ""),
+#                       RECTM = col_time(format = ""),
+#                       RPTTM = col_time(format = ""),
+#                       LSILORNG = col_double(),
+#                       LSIHIRNG = col_double(),
+#                       LUSLORNG = col_double(),
+#                       LUSHIRNG = col_double()
+#                     ))  %>% 
+#   select(-PAG_NAME, -LCOLLDT, -COLLTM, -LRECDT, -RECTM,-RPTTM,
+#          -LABCODE,-LVISTYPE) %>% 
+#   mutate(Date = convert_monthyear_num(LRPTDT)) %>% 
+#   group_by(PATNO,EVENT_ID,LTSTNAME) %>% 
+#   arrange(Date) %>% 
+#   filter(row_number() == n()) %>% 
+#   ungroup %>% 
+#   select(PATNO, EVENT_ID, LTSTNAME, LSIRES) %>% 
+#   mutate(LSIRES=as.numeric(LSIRES)) %>% 
+#   spread(LTSTNAME,LSIRES)
+
+pd_med_use <- read_csv("raw-data/Medical_History/Use_of_PD_Medication.csv",col_types = cols(QUERY="c",FULNUPDR="c")) %>% 
+  select(-REC_ID,-F_STATUS,-PAG_NAME,-INFODT,-NUPDWPRF,-NOUNFRSN,-NUPOSMAS,-ORIG_ENTRY,-LAST_UPDATE,-QUERY,-SITE_APRV)
+
+conmed <- read_csv("raw-data/Medical_History/Concomitant_Medications.csv",col_types = cols(
+  .default = col_character(),
+  REC_ID = col_integer(),
+  PATNO = col_integer(),
+  CMSEQ = col_integer(),
+  CMDOSE = col_double(),
+  ROUTE = col_integer(),
+  ONGOING = col_integer(),
+  DISMED = col_integer(),
+  LAST_UPDATE = col_datetime(format = "")
+)) %>% 
+  mutate(ld33 = (LEDD=="LD x 0.33")) %>%
+  mutate(ld5 = (LEDD=="LD x 0.5")) %>% 
+  mutate(LEDD = parse_double(LEDD,na = c("LD x 0.5","LD x 0.33"))) %>% 
+  mutate(LEDD = replace(LEDD,is.na(LEDD),0)) %>% 
+  mutate(ld33 = replace(ld33,is.na(ld33),FALSE)) %>% 
+  mutate(ld5 = replace(ld5,is.na(ld5),FALSE)) %>% 
+  #filter(!is.na(LEDD)) %>% 
+  mutate(STARTDT=convert_monthyear_num(STARTDT),
+         STOPDT=convert_monthyear_num(STOPDT))
+
+sig <- read_csv("raw-data/Study_Enrollment/Signature_Form.csv", col_types=
+                  cols(
+                    REC_ID = col_integer(),
+                    F_STATUS = col_character(),
+                    PATNO = col_integer(),
+                    EVENT_ID = col_character(),
+                    PAG_NAME = col_character(),
+                    INFODT = col_character(),
+                    VISSTAT = col_integer(),
+                    VISSTCM = col_character(),
+                    VISMSRSN_CODE = col_character(),
+                    ASSESCMP = col_integer(),
+                    LGCMED2 = col_integer(),
+                    LGAE2 = col_integer(),
+                    LGCONDTN = col_integer(),
+                    ORIG_ENTRY = col_character(),
+                    LAST_UPDATE = col_datetime(format = ""),
+                    QUERY = col_character(),
+                    SITE_APRV = col_character()
+                  )) %>% 
+  mutate(INFODT=convert_monthyear_num(INFODT)) 
+
+conmedpd <- conmed %>% filter(DISMED==1)
+ledd <- numeric(nrow(sig))
+for (i in 1:nrow(sig)) {
+  meds_at_i <-
+    conmedpd %>%
+    filter(PATNO==sig$PATNO[[i]],
+           is.na(STARTDT) | STARTDT<sig$INFODT[[i]], # Note: We use strictly smaller, to encode that starting today does not affect today's measurements.
+           is.na(STOPDT) | STOPDT>=sig$INFODT[[i]])
+
+  if (any(meds_at_i$ld33) | any(meds_at_i$ld5)) {
+    # Count total levodopa LEDD
+    total_levo <- meds_at_i$LEDD %>% sum
+    meds_at_i %>% mutate(LEDD=case_when(ld33==TRUE~total_levo/3, ld5==TRUE~total_levo/2, TRUE~LEDD))
+  }
+  ledd[[i]] <- meds_at_i$LEDD %>% sum
+}
+
+ledds <- sig %>% mutate(LEDD=ledd) %>%
+  select(PATNO,EVENT_ID,LEDD)
+
+vital <- read_csv("raw-data/Medical_History/Vital_Signs.csv",
+                  col_types = cols(
+  .default = col_integer(),
+  F_STATUS = col_character(),
+  EVENT_ID = col_character(),
+  PAG_NAME = col_character(),
+  INFODT = col_character(),
+  WGTKG = col_double(),
+  TEMPC = col_double(),
+  ORIG_ENTRY = col_character(),
+  LAST_UPDATE = col_datetime(format = ""),
+  QUERY = col_character(),
+  SITE_APRV = col_character()
+)) %>% 
+  select(-REC_ID,-F_STATUS,-PAG_NAME,-INFODT,-ORIG_ENTRY, -LAST_UPDATE, -QUERY, -SITE_APRV) %>% 
+  mutate(BMI = WGTKG/(HTCM/100)^2)
+  
+conditions <- read_csv("raw-data/Medical_History/Current_Medical_Conditions_Log.csv", col_types=
+                         cols(
+                           .default = col_character(),
+                           REC_ID = col_integer(),
+                           PATNO = col_integer(),
+                           SEQNO = col_integer(),
+                           DIAGYR = col_integer(),
+                           RESOLVD = col_integer(),
+                           RESYR = col_integer(),
+                           PT_CODE = col_integer(),
+                           VMEDDRA = col_double(),
+                           LAST_UPDATE = col_datetime(format = "")
+                         )) %>% 
+  mutate(Disease = case_when(
+    HLT_NAME %in% c("Elevated cholesterol") ~ "Hyperlipidaemia",
+    HLT_NAME == "Lipid metabolism and deposit disorders NEC" ~ "Dyslipidaemia",
+    HLT_NAME == "Diabetes mellitus (incl subtypes)" ~ "Diabetes",
+    HLT_NAME == "Vascular hypertensive disorders NEC" ~ "Hypertension",
+    HLT_NAME %in% c("Coronary artery disorders NEC","Ischaemic coronary artery disorders","Supraventricular arrhythmias") ~ "Heart disease",
+    TRUE ~ NA_character_
+  )) %>% 
+  filter(!is.na(Disease)) %>% 
+  filter(is.na(RESOLVD) | RESOLVD==0) %>% 
+  group_by(PATNO,Disease) %>% 
+  arrange(DIAGYR) %>% 
+  slice(1) %>% 
+  ungroup %>% 
+  select(PATNO,Disease,DIAGYR) %>% 
+  spread(Disease,DIAGYR)
+
+cv_terms <- c(
+  'CORONARY ARTERY DISEASE',
+  'MYOCARDIAL INFARCTION',
+  'ANGINA',
+  'HEART ATTACK',
+  'TRANSIENT ISCHEMIC ATTACK',
+  'CABG',
+  'CAD',
+  'CHRONIC ISCHEMIC HEART DISEASE',
+  'CORONARY ARTERY BYPASS GRAFT SURGERY',
+  'CORONARY ARTERY DISEASE (CAD)',
+  'CORONARY ARTERY DISEASE WITH STENT PLACEMENT',
+  'TRANSIENT ISCHEMIC ATTACK',
+  'TIA'
+)
+
+gmh <- read_csv("raw-data/Medical_History/General_Medical_History.csv",
+                col_types = cols(
+                  .default = col_character(),
+                  REC_ID = col_double(),
+                  PATNO = col_double(),
+                  MHROW = col_double(),
+                  MHHX = col_double(),
+                  MHACTRES = col_double(),
+                  MHDIAGYR = col_double(),
+                  PT_CODE = col_double(),
+                  LAST_UPDATE = col_datetime(format = "")
+                )) %>% 
+  mutate(CV_HISTORY = case_when(
+    str_detect(VERBATIM, 'STROKE') | VERBATIM %in% cv_terms ~ 1,
+    TRUE ~ 0
+  )) %>%
+  distinct(PATNO, CV_HISTORY) %>%
+  group_by(PATNO) %>% # if somebody has cvhist but non cv diseases in MH, register as somebody with cvhist
+  arrange(desc(CV_HISTORY)) %>%
+  slice(1) %>%
+  ungroup
+
+subject_characteristics <- left_join(subject_characteristics,gmh,by="PATNO")
+
+# remove ,ledds,biospecimen,blood
+save(subject_characteristics,non_motor,mds_total,datscan,datscan_visual,mds_1,mds_2,mds_3,mds_4, mds_measurements,pd_med_use,vital,conditions,modified_schwab,ledds,moca,scopa,sig,conmed,file="data/data.RData")
+```
+
+## Combine Data
+
+### Fixed Variables (df_constant)
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+library(tidyverse)
+library(broom)
+library(knitr)
+source("R/tools.R")
+
+load("data/data.RData")
+```
+
+```{r constant-variables}
+df_constant <- subject_characteristics %>% 
+  filter(!is.na(Group)) %>% 
+  select(PATNO,Education,Sex,Age,`Disease duration`,`Family history`,Group,UPSIT,ENROLL_DATE,CV_HISTORY) %>% 
+  mutate(ENROLL_DATE=convert_monthyear_num(ENROLL_DATE)) %>% 
+  rename(FAM_HISTORY=`Family history`) %>%
+  filter(!(PATNO %in% c(52563,41635,73467))) # remove duplicated rows
+
+# Checks
+# Every patient in the dataset once
+df_constant %>% count(PATNO,sort = TRUE) %>% {.$n ==1} %>% all
+```
+
+```{r constant-summary}
+fac_to_str <- function(x) {
+  x %>% 
+    forcats::fct_infreq() %>% 
+    table %>% 
+    prop.table() %>% 
+    {.*100} %>%  
+    round(digits = 1) %>% 
+    {paste(names(.), ., sep = ": ", collapse=", ")}
+}
+
+cont_to_str <- function(x) {
+  paste0(x %>% 
+    mean %>%
+    round(digits = 1) %>% 
+    as.character," (",
+    x %>% 
+    sd %>%
+    round(digits = 1) %>% 
+    as.character,")"
+  )
+}
+
+df_constant %>%
+  group_by(Group) %>%
+  summarize(n=n(),
+            Sex=fac_to_str(Sex),
+            Age=cont_to_str(Age),
+            Duration=cont_to_str(`Disease duration`),
+            Education=cont_to_str(Education)) %>%
+  gather("Var","Val",-Group) %>%
+  mutate(Var=fct_inorder(Var)) %>%
+  spread(Group,Val) %>%
+  kable()
+```
+
+### Repeated Measures (df_repeated)
+We remove the U01 measurements and premature withdrawal measurements. 
+
+```{r}
+df_repeated <- sig %>% 
+  select(PATNO,EVENT_ID,Date=INFODT) %>% 
+  filter(!(EVENT_ID %in% c("U01","PW"))) %>% 
+  left_join(df_constant %>% select(PATNO,ENROLL_DATE),by="PATNO") %>% 
+  mutate(Time=`Date`-ENROLL_DATE) %>% 
+  select(-ENROLL_DATE) %>% 
+  mutate(Year = case_when(
+    EVENT_ID=="BL" ~ 0,
+    EVENT_ID=="V01" ~ 0.25,
+    EVENT_ID=="V02" ~ 0.5,
+    EVENT_ID=="V03" ~ 0.75,
+    EVENT_ID=="V04" ~ 1,
+    EVENT_ID=="V05" ~ 1.5,
+    EVENT_ID=="V06" ~ 2,
+    EVENT_ID=="V07" ~ 2.5,
+    EVENT_ID=="V08" ~ 3,
+    EVENT_ID=="V09" ~ 3.5,
+    EVENT_ID=="V10" ~ 4,
+    EVENT_ID=="V11" ~ 4.5,
+    EVENT_ID=="V12" ~ 5,
+    EVENT_ID=="V13" ~ 6,
+    TRUE ~ NA_real_
+  ))
+
+df_repeated <- df_repeated %>%
+  left_join(remsleep %>% select(-RBD), by=c("PATNO","EVENT_ID")) %>%
+  left_join(datscan %>% select(PATNO,EVENT_ID,`Mean Caudate`), by=c("PATNO","EVENT_ID"))
+```
+
+#### MDS-UDPRS
+##### Part I and II
+```{r}
+mds_1 %>% count(PATNO,EVENT_ID,sort = TRUE) %>% {.$n ==1} %>% all
+mds_2 %>% count(PATNO,EVENT_ID,sort = TRUE) %>% {.$n ==1} %>% all
+mds_4 %>% count(PATNO,EVENT_ID,sort = TRUE) %>% {.$n ==1} %>% all
+
+df_repeated <- df_repeated %>% 
+  left_join(mds_1 %>% select(PATNO,EVENT_ID,MDS_UPDRS_I,NP1ANXS,NP1DDS),by=c("PATNO","EVENT_ID")) %>% 
+  left_join(mds_2 %>% select(PATNO,EVENT_ID,MDS_UPDRS_II),by=c("PATNO","EVENT_ID")) %>% 
+  left_join(mds_4 %>% select(PATNO,EVENT_ID,MDS_UPDRS_IV,NP4WDYSK,NP4OFF),by=c("PATNO","EVENT_ID")) %>% 
+  mutate(NP4WDYSK=as.integer(NP4WDYSK>0),NP4OFF=as.integer(NP4OFF>0))
+```
+
+##### Part III: On-Off state measurements
+
+At semi-annual visits, we do not know the time since last dose, so we can strictly only consider patients with no medication as having off visits at those times.
+
+When we have two on or off measurements due to the time since last medication, we pick the measurement that corresponds to the purpose of the used form.
+
+```{r}
+mds_3 %>% count(PAG_NAME,EVENT_ID) %>% spread(PAG_NAME,n)
+mds_total %>% left_join(df_constant) %>% filter(Group=="PD") %>%  mutate(on_off = case_when(
+    PD_MED_USE == "None" | (PD_MED_USE != "None" & ON_OFF_DOSE == ">=6hr") ~ "Off",
+    PD_MED_USE != "None" & ON_OFF_DOSE == "<6hr" ~ "On",
+    TRUE ~ "Other"
+  )) %>% 
+  count(on_off,EVENT_ID) %>%  spread(on_off,n)
+```
+
+```{r}
+# Here we take into account the intent of the measurement signalled by the form used
+mds_other <- mds_3 %>% 
+  filter(PAG_NAME=="NUPDRS3") %>% 
+  select(PATNO,EVENT_ID,MDS_UPDRS_III_other=MDS_UPDRS_III)
+
+df_repeated <- left_join(df_repeated, mds_other %>% select(PATNO,EVENT_ID,MDS_UPDRS_III_other), by = c("PATNO", "EVENT_ID"))
+```
+
+```{r}
+mds_off <- 
+  mds_total %>% 
+  mutate(on_off = case_when(
+    PD_MED_USE == "None" | (PD_MED_USE != "None" & ON_OFF_DOSE == ">=6hr") ~ "Off",
+    PD_MED_USE != "None" & ON_OFF_DOSE == "<6hr" ~ "On",
+    TRUE ~ "Other"
+  )) %>% 
+  mutate(matching_action = case_when(
+    (on_off=="Off" & PAG_NAME=="NUPDRS3") | (on_off=="On" & PAG_NAME=="NUPDRS3A") ~ 1,
+    TRUE ~ 0
+  )) %>% 
+  group_by(PATNO,EVENT_ID,on_off) %>% 
+  arrange(desc(matching_action)) %>% 
+  slice(1) %>% 
+  ungroup %>% 
+  select(PATNO,EVENT_ID,on_off,MDS_UPDRS_III) %>% 
+  spread(on_off,MDS_UPDRS_III) %>% 
+  rename(MDS_UPDRS_III_off=Off,MDS_UPDRS_III_on=On) %>% 
+  select(-Other)
+
+df_repeated <- left_join(df_repeated, mds_off %>% select(PATNO,EVENT_ID,MDS_UPDRS_III_off,MDS_UPDRS_III_on), by = c("PATNO", "EVENT_ID"))
+```
+
+#### MoCA, SE, MCI, QUIP
+No MOCA administered at baseline, so take the measurement at screening (SC, approximately 1 month earlier than baseline). If the adjusted MoCA score is missing, use the score calculated by the examiner.
+
+```{r}
+df_repeated <- df_repeated %>% 
+  left_join(
+    moca %>% mutate(EVENT_ID=replace(EVENT_ID,EVENT_ID=="SC","BL")) %>% 
+      mutate(MOCA_adjusted=if_else(is.na(MOCA_adjusted) & !is.na(MCATOT), MCATOT, MOCA_adjusted)) %>% 
+      select(PATNO,EVENT_ID,MoCA=MOCA_adjusted),
+    by=c("PATNO","EVENT_ID")
+  )
+
+df_repeated <- df_repeated %>% 
+  left_join(modified_schwab,by=c("PATNO","EVENT_ID"))
+
+df_repeated <- df_repeated %>% 
+  left_join(non_motor %>% select(PATNO,EVENT_ID,QUIP,QUIP8,QUIPany), by=c("PATNO","EVENT_ID"))
+
+df_repeated <- df_repeated %>% 
+  left_join(scopa %>% select(PATNO,EVENT_ID,`SCOPA-AUT`), by=c("PATNO","EVENT_ID"))
+```
+
+#### Medication Use
+How does medication in the medication log correspond to reported parkinson medication in the questionaire?
+
+```{r}
+events <- c("SC","BL","ST",paste0("V0",1:9),paste0("V",10:13))
+
+# LEDD from medication log
+df_usage1 <- ledds %>% 
+  #filter(EVENT_ID %in% events) %>% 
+  mutate(LEDDnonzero=LEDD>0.0) %>% 
+  select(PATNO,EVENT_ID,LEDDnonzero)
+
+# PD Medication from form
+df_usage2 <- pd_med_use %>% 
+  #filter(EVENT_ID %in% events) %>% 
+  select(PATNO,EVENT_ID,PDMEDYN) %>% 
+  mutate(PDMEDYN=as.logical(PDMEDYN))
+
+# Levo from form
+df_usage3 <- pd_med_use %>% 
+  filter(EVENT_ID %in% events) %>% 
+  select(PATNO,EVENT_ID,ONLDOPA) %>% 
+  mutate(ONLDOPA=if_else(is.na(ONLDOPA),FALSE,TRUE))
+
+# Levo from UPDRS form
+df_usage4 <- mds_3 %>% 
+  filter(EVENT_ID %in% events) %>% 
+  select(PATNO,EVENT_ID,PD_MED_USE) %>% 
+  distinct(PATNO,EVENT_ID,.keep_all = TRUE) %>% 
+  mutate(LevoMed=PD_MED_USE %in% c(1,4,5,7))
+
+df_repeated <- df_repeated %>% 
+  left_join(df_usage1, by = c("PATNO", "EVENT_ID")) %>% 
+  left_join(df_usage2, by = c("PATNO", "EVENT_ID")) %>%
+  left_join(df_usage3, by = c("PATNO", "EVENT_ID")) %>% 
+  left_join(df_usage4, by = c("PATNO", "EVENT_ID")) %>% 
+  mutate(ONLDOPA=replace(ONLDOPA,EVENT_ID %in% c("SC","BL"),FALSE)) %>% 
+  mutate(PDMEDYN=replace(PDMEDYN,EVENT_ID=="BL",FALSE)) %>% 
+  mutate(ONLDOPA=if_else(is.na(ONLDOPA) & !is.na(LevoMed),LevoMed,ONLDOPA)) %>% 
+  left_join(ledds, by=c("PATNO","EVENT_ID"))
+```
+
+```{r}
+save(df_repeated, df_constant, file="data/causal-ppmi.RData")
+```
+
+## Data Imputation
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(broom)
+source("R/tools.R")
+
+load("data/causal-ppmi.RData")
+```
+
+```{r}
+#' Imputes values by taking the mean of the 2 surrounding values
+impute_middle <- function(var,distance=1) {
+  if_else(is.na(var),(lag(var,distance)+lead(var,distance))/2,as.numeric(var))
+}
+
+#' Imputes values of treatment from surrounding values and assuming monotonicity of assignment
+impute_treatment_single <- function(val) {
+  case_when(
+    !is.na(val) ~ val,
+    lag(val) & lead(val) ~ TRUE,
+    !lag(val) & lead(val) ~ FALSE, # Note: if we are unsure therapy was initiated, assume it is.
+    !lag(val) & !lead(val) ~ FALSE,
+    TRUE ~ NA
+  )
+}
+
+#' Impute treatment for variables
+impute_treatment <- function(data, vars_impute) {
+  data %>% 
+    group_by(id) %>% 
+    mutate_at(vars_impute,impute_treatment_single) %>% 
+    ungroup
+}
+
+impute_treatment_type_single <- function(val) {
+  case_when(
+    !is.na(val) ~ val,
+    !is.na(lead(val)) ~ lead(val),
+    TRUE ~ NA_integer_
+  )
+}
+
+impute_treatment_type <- function(data, vars_impute) {
+  data %>% 
+    group_by(id) %>% 
+    mutate_at(vars_impute,impute_treatment_type_single) %>% 
+    ungroup
+}
+
+# Person 4070 did not have values at baseline, impute from second measurement
+modelfun <- function(.x,time) {
+  if (time==0) {
+    lm(Value~lead,data=.x)
+  } else if (nrow(na.omit(.x))==0) {
+    NULL
+  } else {
+      lm(Value~lag+lead,data=.x)
+  }
+}
+
+#' Impute values by linear models with the next and previous value in the sequence
+impute_linear_fast <- function(data, vars_impute, distance=1) {
+  
+  data %>% 
+    select(id,time,one_of(vars_impute)) %>% 
+    gather("Var","Value",-id,-time) %>% 
+    group_by(id,Var) %>% 
+    arrange(time) %>%
+    mutate_at(vars("Value"),list("lead"=function(x) {lead(x,n = distance)},"lag"=function(x) {lag(x,n = distance)})) %>% 
+    ungroup %>% 
+    group_by(Var,time) %>% 
+    nest() %>% 
+    mutate(model=map(data, ~if (nrow(na.omit(.x))==0) {NULL} else {lm(Value~lag+lead,data=.x)})) %>%
+    mutate(model=map2(data,time,modelfun)) %>%
+    mutate(pred=map2(data, model, ~if (is.null(.y)) {rep(NA_real_,nrow(.x))} else {predict(.y,.x) })) %>% 
+    select(-model) %>% 
+    unnest %>% 
+    mutate(Value=if_else(!is.na(Value),as.numeric(Value),as.numeric(pred))) %>% 
+    select(id,time,Var,Value) %>% 
+    spread(Var,Value) %>% 
+    left_join(data %>% select(-one_of(vars_impute)),.,by=c("id","time"))
+}
+
+#' Returns missing of any of the variables has a missing value
+determine_missing <- function(m,vars) {
+  m %>% select(one_of(vars)) %>% mutate_all(is.na) %>% apply(1,any)
+}
+
+#' Turn missingness variable into censoring variable
+censor <- function(m) {
+  cen <- rep(FALSE,length(m))
+  for (i in seq_along(m)) {
+    if (i==1) cen[i] <- m[i]
+    else cen[i] <- (m[i] | cen[i-1])
+  }
+  cen
+}
+```
+
+### Constant Features (df_constant_selected)
+```{r}
+# Constant Characteristics
+df_constant_selected <- df_constant %>% 
+  filter(Group=="PD") %>% 
+  mutate(id=as.character(PATNO)) %>% 
+  rename(Duration=`Disease duration`) %>% 
+  select(id, Age, Sex, Duration, FAM_HISTORY, Education, UPSIT, Group, CV_HISTORY)
+```
+
+### ST measurements (df_t, df_sts, df_repeated_a)
+```{r}
+events <- c("BL","V02","V04","V05","V06","V07","V08","V09","V10","V11","V12","ST")
+events_all <- c("BL","V01","V02","V03","V04","V05","V06","V07","V08","V09","V10","V11","V12","ST")
+
+df_t <- df_repeated %>% 
+  mutate(id=as.character(PATNO)) %>% 
+  filter(id %in% df_constant_selected$id) %>% 
+  filter(EVENT_ID %in% events_all)  %>% 
+  mutate(PDMEDYN=if_else(is.na(PDMEDYN) & EVENT_ID=="ST", FALSE, PDMEDYN))
+
+# Find all times where there is a ST measurements and see which measurement should be replaced
+df_sts <- semi_join(df_t, df_t %>% filter(EVENT_ID=="ST"),by=c("PATNO","Time")) %>% 
+  group_by(id,Time) %>% 
+  arrange(EVENT_ID) %>% 
+  mutate(Year=Year[n()],stolen=EVENT_ID[n()]) %>%  # Usually the last observation that is replaced
+  slice(1) %>% 
+  ungroup %>% 
+  select(-stolen) %>% 
+  mutate(Year=if_else(is.na(Year),ceiling(Time*2)/2,Year)) # When year still missing, this is usually because the next observation is missing 
+
+df_repeated_a <- df_t %>% 
+  filter(EVENT_ID!="ST") %>% 
+  bind_rows(df_sts) %>% 
+  arrange(id,EVENT_ID) %>% 
+  distinct(id,Year,.keep_all = TRUE) %>% # Keep only ST measurements at those times
+  mutate(Month=Year*12) %>%
+  rename(Caudate=`Mean Caudate`) %>%
+  rename(SCOPA_AUT=`SCOPA-AUT`)
+```
+
+### Imputation (df_varying, df_varying_selected)
+```{r}
+vars_impute <- c("MDS_UPDRS_I","NP1ANXS","NP1DDS","MDS_UPDRS_II","MDS_UPDRS_III_other","MSEADLG","SCOPA_AUT","RBDSQ")
+
+df_varying <- df_repeated_a %>%
+  filter(Month %in% c(0,6,12,18,24,30,36,42,48,54,60)) %>%
+  mutate(time=Month/6) %>% 
+  arrange(id,time) %>% 
+  impute_linear_fast(vars_impute = vars_impute,distance=1) %>% 
+  impute_linear_fast(c("MoCA"),distance=2) %>%
+  mutate(MoCA = impute_middle(MoCA)) %>%
+  mutate(PDMEDYN=if_else(is.na(PDMEDYN) & !is.na(LEDDnonzero),LEDDnonzero,PDMEDYN)) %>% 
+  mutate(PDMEDYN=if_else(is.na(PDMEDYN) & ONLDOPA,TRUE,PDMEDYN)) %>% # if on ldopa, then on pdmed
+  mutate(ONLDOPA=if_else(is.na(ONLDOPA) & !PDMEDYN,FALSE,ONLDOPA)) %>% # if not on pdmed then no ldopa
+  impute_treatment(c("ONLDOPA","PDMEDYN")) %>% 
+  impute_treatment_type(c("PD_MED_USE")) %>% 
+  mutate(PDMEDYN=if_else(is.na(PDMEDYN) & ONLDOPA,TRUE,PDMEDYN)) %>% # if on ldopa, then on pdmed
+  mutate(ONLDOPA=if_else(is.na(ONLDOPA) & !PDMEDYN,FALSE,ONLDOPA)) %>% # if not on pdmed then no ldopa
+  # mutate(MoCA=if_else(Month %in% c(6,18,30,42,54),99,MoCA)) %>%
+  mutate(.,missing=determine_missing(.,c("MDS_UPDRS_I","MDS_UPDRS_II","MDS_UPDRS_III_other","MSEADLG","MoCA","PDMEDYN","ONLDOPA"))) %>% 
+  # mutate(MoCA=if_else(Month %in% c(6,18,30,42,54),NA_real_,MoCA)) %>% 
+  group_by(id) %>% 
+  arrange(time) %>% 
+  mutate(censored=censor(missing)) %>% 
+  # mutate(censored_next=lead(censored)) %>%
+  mutate(censored_lag=lag(censored,default = FALSE)) %>%
+  ungroup %>% 
+  filter(!censored_lag, !censored) %>% 
+  mutate(Month=time*6) %>%
+  select(-Caudate) # too many missing, useless variable
+
+df_varying_selected <- df_varying %>% 
+  filter(time %in% c(0,1,2,3,4)) %>% 
+  select(id,time,starts_with("MDS_"),starts_with("MoCA"),starts_with("MSEADLG"),ONLDOPA,PDMEDYN,censored,PD_MED_USE,QUIP,QUIP8,QUIPany,NP4WDYSK,NP4OFF,LEDD,SCOPA_AUT)
+
+df_last <- df_varying %>% 
+    mutate(Year=Month/12) %>% 
+    filter(Year %in% c(2,3,4)) %>% 
+    mutate(Year=factor(Year)) %>% 
+    select(-EVENT_ID,-PATNO,-Time,-Date) %>% 
+    select(id,Year,starts_with("MDS"),MoCA,MSEADLG,SCOPA_AUT,QUIP,QUIP8,QUIPany,NP4WDYSK,NP4OFF,LEDD,PDMEDYN,ONLDOPA) %>% 
+    as.data.frame %>% 
+    reshape(idvar = "id", timevar="Year", direction="wide", sep="_year")  %>%
+  select(id,starts_with("MDS_"),starts_with("MoCA"),starts_with("MSEADLG"),starts_with("SCOPA_AUT"),starts_with("QUIP"),starts_with("NP4WDYSK"),starts_with("NP4OFF"),starts_with("LEDD"),starts_with("PDMEDYN"),starts_with("ONLDOPA"))
+```
+
+### Save Datasets
+```{r}
+saveRDS(df_constant_selected, "data/df_constant.rds")
+saveRDS(df_varying,"data/df_varying_all.rds")
+saveRDS(df_varying_selected, "data/df_varying.rds")
+saveRDS(df_last, "data/df_last.rds")
+```
+
+## DTRs Model (pats_stopped_PDMEDYN, df_v_PDMEDYN)
+```{r}
+pats_stopped_PDMEDYN <-
+  df_varying %>%
+  mutate(treatment=PDMEDYN) %>%
+  group_by(id) %>%
+  arrange(time) %>%
+  mutate(treatment_prev=lag(treatment)) %>%
+  ungroup %>%
+  filter(treatment_prev==TRUE, treatment==FALSE) %>% .$id %>% unique
+
+pats_stopped_PDMEDYN <- c(pats_stopped_PDMEDYN,
+  df_varying %>% mutate(treatment=PDMEDYN) %>% filter(time==0,treatment==TRUE) %>% .$id)
+
+### On medication
+df_v_PDMEDYN <- df_varying %>%
+  filter(!(id %in% pats_stopped_PDMEDYN)) %>%
+  mutate(treatment=as.integer(PDMEDYN)) %>%
+  mutate(MDS_UPDRS_III_off=if_else(time==0,MDS_UPDRS_III_other,as.numeric(MDS_UPDRS_III_off))) %>%
+  arrange(id, Date)
+
+attach(df_v_PDMEDYN)
+time_details <- as.data.frame(levels(factor(id)))
+colnames(time_details) <- "id"
+for (ID in time_details$id){
+  i <- which(time_details$id==ID)
+  time_details$tr_time[i] <- time[which(treatment[id==ID]==1)[1]]
+  time_details$last_time[i] <- tail(time[which(id==ID)],n=1)
+}
+detach()
+
+time_details %>%
+  group_by(tr_time) %>%
+  summarise(
+    nobs = n()) %>%
+  knitr::kable()
+```
+
+### Data
+
+#### df_v_DTRs
+```{r}
+# Remove patients whose treatment starts later than time 4 or NA.
+df_v_DTRs <- df_v_PDMEDYN %>%
+  select(id,PATNO,EVENT_ID,time,Month,NP1ANXS,NP1DDS,RBDSQ,MoCA,treatment,MDS_UPDRS_III_off,MDS_UPDRS_III_other,MDS_UPDRS_I,MDS_UPDRS_II,censored) %>%
+  mutate(RBDSQ = impute_middle(RBDSQ)) %>%
+  left_join(time_details, by="id")
+
+time_details %>%
+  group_by(last_time) %>%
+  summarise(
+    nobs = n()) %>%
+  knitr::kable()
+```
+#### df_c_DTRs
+```{r}
+# Constant variables for DTRs.
+df_c_DTRs <- df_constant %>%
+  filter(!(PATNO %in% pats_stopped_PDMEDYN)) %>%
+  filter(Group=="PD") %>%
+  mutate(id = as.character(PATNO)) %>%
+  select(-PATNO,-Group,-ENROLL_DATE)
+
+saveRDS(df_v_DTRs, "data/df_v_DTRs.rds")
+saveRDS(df_c_DTRs, "data/df_c_DTRs.rds")
+```
+
+### Data Preparetion and Variable Selection
+```{r}
+library(dplyr)
+
+df_DTRs_0 <- df_v_DTRs %>%
+  left_join(df_c_DTRs, by="id") %>%
+  filter(last_time >= 8) %>%
+  filter(time %in% c(0,1,2,3,4,8)) %>%
+  as.data.frame %>% 
+  # mutate(Age=Age+Month/12) %>% no need after looking many DTR examples
+  # mutate(`Disease duration`=`Disease duration`+Month/12) %>% no need
+  rename(Duration=`Disease duration`) %>%
+  # select(-PATNO,-EVENT_ID,-Month,-censored,-tr_time,-last_time) %>%
+  dplyr::select(id,time,Month,Sex,Age,Duration,FAM_HISTORY,NP1ANXS,NP1DDS,RBDSQ,MoCA,treatment,starts_with("MDS_UPDRS"),ends_with("_time"),-MDS_UPDRS_III_off) %>%
+  reshape(idvar = c("id","tr_time","last_time","Age","Duration","Sex","FAM_HISTORY"), timevar="time", direction="wide", sep=".")
+
+which(rowSums(is.na(df_DTRs_0 %>% select(-starts_with("RBDSQ")))) > 0) # Most NA are on RBDSQ columns.
+df_DTRs_0 <- df_DTRs_0 %>%
+  filter(id!="3175") # This NA needs to be remove as its NA is on tr_time.
+
+df_DTRs_1 <- df_DTRs_0 %>%
+  filter(tr_time >= 1 | is.na(tr_time)) %>%
+  dplyr::select(-ends_with("_time"))
+df_DTRs_2 <- df_DTRs_0 %>%
+  filter(tr_time >= 2 | is.na(tr_time)) %>%
+  dplyr::select(-ends_with("_time"))
+df_DTRs_3 <- df_DTRs_0 %>%
+  filter(tr_time >= 3 | is.na(tr_time)) %>%
+  dplyr::select(-ends_with("_time"))
+df_DTRs_4 <- df_DTRs_0 %>%
+  filter(tr_time >= 4 | is.na(tr_time)) %>%
+  dplyr::select(-ends_with("_time"))
+
+# data for variable selection, need full (no NA) data
+
+df_DTRs_full <- df_v_DTRs %>%
+  left_join(df_c_DTRs, by="id") %>%
+  filter(last_time >= 8) %>%
+  filter(time %in% c(0,1,2,3,4,8)) %>%
+  as.data.frame %>% 
+  # mutate(Age=Age+Month/12) %>% no need after looking many DTR examples
+  # mutate(`Disease duration`=`Disease duration`+Month/12) %>% no need
+  rename(Duration=`Disease duration`) %>%
+  # select(-PATNO,-EVENT_ID,-Month,-censored,-tr_time,-last_time) %>%
+  # select(-MDS_UPDRS_III_off) %>%
+  filter(rowSums(is.na(.))==0)
+
+df_DTRs_4_full <- df_DTRs_4 %>%
+  filter(rowSums(is.na(df_DTRs_4))==0)
+df_DTRs_3_full <- df_DTRs_3 %>%
+  filter(rowSums(is.na(df_DTRs_3))==0)
+df_DTRs_2_full <- df_DTRs_2 %>%
+  filter(rowSums(is.na(df_DTRs_2))==0)
+df_DTRs_1_full <- df_DTRs_1 %>%
+  filter(rowSums(is.na(df_DTRs_1))==0)
+```
+
+#### VS for Treatment Model
+
+Trying to find a nice logistics model to predict propensity scores.
+
+```{r}
+library(MASS) # Be careful that 'select' function is changed.
+
+model <- glm(treatment.4~MDS_UPDRS_III_other.4+RBDSQ.4+MoCA.4+NP1ANXS.4+NP1DDS.4+MDS_UPDRS_II.4+Duration+Age, data=df_DTRs_4_full, family = binomial) %>%
+  stepAIC(direction = "both",trace = F)
+# Summarize the final selected model
+summary(model)
+
+model <- glm(treatment.1~MDS_UPDRS_III_other.1+RBDSQ.1+MoCA.1+NP1ANXS.1+NP1DDS.1+MDS_UPDRS_II.1+Duration+Age, data=df_DTRs_1_full, family = binomial) %>%
+  stepAIC(direction = "both",trace = F)
+# Summarize the final selected model
+summary(model)
+
+model <- glm(treatment.2~MDS_UPDRS_III_other.2+RBDSQ.2+MoCA.2+NP1ANXS.2+NP1DDS.2+MDS_UPDRS_II.2+Duration+Age, data=df_DTRs_2_full, family = binomial) %>%
+  stepAIC(direction = "both",trace = F)
+# Summarize the final selected model
+summary(model)
+
+model <- glm(treatment.3~MDS_UPDRS_III_other.3+RBDSQ.3+MoCA.3+NP1ANXS.3+NP1DDS.3+MDS_UPDRS_II.3+Duration+Age, data=df_DTRs_3_full, family = binomial) %>%
+  stepAIC(direction = "both",trace = F)
+# Summarize the final selected model
+summary(model)
+
+# Because above outputs are not so conviencing, I use all observations trying to find the most related variables in spite of their stages.
+model <- glm(treatment~MDS_UPDRS_III_other+RBDSQ+MoCA+NP1ANXS+NP1DDS+MDS_UPDRS_II+Duration+Age+FAM_HISTORY, data=df_DTRs_full, family = binomial) %>%
+  stepAIC(direction = "both",trace = F)
+# Summarize the final selected model
+summary(model)
+```
+
+#### VS for Treatment-free Models and Blips
+
+Here we are inspired by work from *Motor Progression in Early-Stage Parkinson’s Disease: A Clinical Prediction Model and the Role of Cerebrospinal Fluid Biomarkers*.
+
+```{r}
+# Fit the model
+model_linear_up_4 <- lm(MDS_UPDRS_III_other.8~Sex+Age+Duration+FAM_HISTORY
+                      +NP1ANXS.0+NP1DDS.0+RBDSQ.0+MoCA.0+MDS_UPDRS_III_other.0
+                      +treatment.1+NP1ANXS.1+NP1DDS.1+RBDSQ.1+MoCA.1+MDS_UPDRS_III_other.1
+                      +MDS_UPDRS_II.1
+                      +treatment.2+NP1ANXS.2+NP1DDS.2+RBDSQ.2+MoCA.2+MDS_UPDRS_III_other.2
+                      +MDS_UPDRS_II.2
+                      +treatment.3+NP1ANXS.3+NP1DDS.3+RBDSQ.3+MoCA.3+MDS_UPDRS_III_other.3
+                      +MDS_UPDRS_II.3
+                      +treatment.4+NP1ANXS.4+NP1DDS.4+RBDSQ.4+MoCA.4+MDS_UPDRS_III_other.4
+                      +MDS_UPDRS_II.4
+                      +treatment.4*MDS_UPDRS_III_other.4+treatment.4*RBDSQ.4+treatment.4*MoCA.4, data=df_DTRs_4_full)
+# No intermediate treatments as they are all 0.
+model_linear_low_4 <- lm(MDS_UPDRS_III_other.8~treatment.4, data=df_DTRs_4_full)
+model_linear_4 <- stepAIC(model_linear_up_4,scope=list(upper=model_linear_up_4,lower=model_linear_low_4),trace=F)
+# Summarize the final selected model
+summary(model_linear_4)
+
+# Stage 2 has most treated cases.
+# Fit the model
+model_linear_up_2 <- lm(MDS_UPDRS_III_other.8~Sex+Age+Duration+FAM_HISTORY
+                      +NP1ANXS.0+NP1DDS.0+RBDSQ.0+MoCA.0+MDS_UPDRS_III_other.0
+                      +MDS_UPDRS_II.0
+                      +treatment.1+NP1ANXS.1+NP1DDS.1+RBDSQ.1+MoCA.1+MDS_UPDRS_III_other.1
+                      +MDS_UPDRS_I.1+MDS_UPDRS_II.1
+                      +treatment.2+NP1ANXS.2+NP1DDS.2+RBDSQ.2+MoCA.2+MDS_UPDRS_III_other.2
+                      +MDS_UPDRS_II.2
+                      +treatment.2*MDS_UPDRS_III_other.2+treatment.2*RBDSQ.2+treatment.2*MoCA.2, data=df_DTRs_2_full)
+model_linear_low_2 <- lm(MDS_UPDRS_III_other.8~treatment.2, data=df_DTRs_2_full)
+model_linear_2 <- stepAIC(model_linear_up_2,scope=list(upper=model_linear_up_2,lower=model_linear_low_2),trace=F)
+# Summarize the final selected model
+summary(model_linear_2)
+
+detach("package:MASS", unload = TRUE)
+```
+
+Notice that in DTRs we do a weighted linear regression but in here we only use simplest linear form, so these results are just references. After combining expert opnions, the final models' variables are not the same.
+
+### Fit DTRs Model stag-by-stage
+
+```{r}
+# Assume that all three MDS-UPDRS scores are tailing variabls
+library(DTRreg)
+
+bl.mod.4 <- list(~MDS_UPDRS_III_other.4+RBDSQ.4+MoCA.4+MDS_UPDRS_II.4)
+tr.mod.4 <- list(treatment.4~MDS_UPDRS_III_other.4+RBDSQ.4+MoCA.4+NP1DDS.4+Duration)
+trf.mod.4 <- list(~MDS_UPDRS_III_other.4+RBDSQ.4+MoCA.4+NP1ANXS.4
+                  # +MDS_UPDRS_III_other.3+RBDSQ.3+MoCA.3+NP1ANXS.3
+                  # +MDS_UPDRS_III_other.2+RBDSQ.2+MoCA.2+NP1ANXS.2
+                  # +MDS_UPDRS_III_other.1+RBDSQ.1+MoCA.1+NP1ANXS.1
+                  +MDS_UPDRS_III_other.0+RBDSQ.0+MoCA.0+NP1ANXS.0
+                  +Duration+Age+FAM_HISTORY)
+# We remove vairalbe NP1DDS.4 due to singularity problem.
+# Seems like DTRreg cannot handle (will output error) complex multi-stage multi-variable cases, and consider that intermediate treatments are all 0, we thus remove those intermediate variables.
+# I do not add previous treatment terms in stage 1,2,3 as they are all 0 (consider carefully, PD disease cannot be stopped after beginning).
+
+DTRs.mod.4 <- DTRreg(-MDS_UPDRS_III_other.8,bl.mod.4,tr.mod.4,trf.mod.4,df_DTRs_4,method="dwols",weight="ipcw",var.estim="bootstrap")
+DTRs.mod.4
+```
+
+```{r}
+df_DTRs_4_pseudo <- df_DTRs_4 %>%
+  mutate(MDS_UPDRS_III_other.8=DTRs.mod.4$opt.Y)
+df_DTRs_3_pseudo <- df_DTRs_3 %>%
+  mutate(MDS_UPDRS_III_other.8=ifelse(id %in% df_DTRs_4_pseudo$id,                              df_DTRs_4_pseudo$MDS_UPDRS_III_other.8,MDS_UPDRS_III_other.8))
+
+bl.mod.3 <- list(~MDS_UPDRS_III_other.3+RBDSQ.3+MoCA.3+MDS_UPDRS_II.3)
+tr.mod.3 <- list(treatment.3~MDS_UPDRS_III_other.3+RBDSQ.3+MoCA.3+Duration)
+trf.mod.3 <- list(~MDS_UPDRS_III_other.3+RBDSQ.3+MoCA.3+NP1ANXS.3
+                  +MDS_UPDRS_III_other.0+RBDSQ.0+MoCA.0+NP1ANXS.0
+                  +Duration+Age+FAM_HISTORY)
+# We remove vairalbe NP1DDS for both treatment and treatment-free models due to singularity problem.
+
+DTRs.mod.3 <- DTRreg(-MDS_UPDRS_III_other.8,bl.mod.3,tr.mod.3,trf.mod.3,df_DTRs_3,method="dwols",weight="ipcw",var.estim="bootstrap")
+DTRs.mod.3
+```
+
+```{r}
+df_DTRs_3_pseudo <- df_DTRs_3 %>%
+  mutate(MDS_UPDRS_III_other.8=DTRs.mod.3$opt.Y)
+df_DTRs_2_pseudo <- df_DTRs_2 %>%
+  mutate(MDS_UPDRS_III_other.8=ifelse(id %in% df_DTRs_3_pseudo$id,                              df_DTRs_3_pseudo$MDS_UPDRS_III_other.8,MDS_UPDRS_III_other.8))
+
+bl.mod.2 <- list(~MDS_UPDRS_III_other.2+RBDSQ.2+MoCA.2+MDS_UPDRS_II.2)
+tr.mod.2 <- list(treatment.2~MDS_UPDRS_III_other.2+RBDSQ.2+MoCA.2+Duration)
+trf.mod.2 <- list(~MDS_UPDRS_III_other.2+RBDSQ.2+MoCA.2+NP1ANXS.2+NP1DDS.2
+                  +MDS_UPDRS_III_other.0+RBDSQ.0+MoCA.0+NP1ANXS.0
+                  +Duration+Age+FAM_HISTORY)
+# We remove vairalbe NP1DDS.0 for treatment-free model.
+
+DTRs.mod.2 <- DTRreg(-MDS_UPDRS_III_other.8,bl.mod.2,tr.mod.2,trf.mod.2,df_DTRs_2,method="dwols",weight="ipcw",var.estim="bootstrap")
+DTRs.mod.2
+```
+
+```{r}
+df_DTRs_2_pseudo <- df_DTRs_2 %>%
+  mutate(MDS_UPDRS_III_other.8=DTRs.mod.2$opt.Y)
+df_DTRs_1_pseudo <- df_DTRs_1 %>%
+  mutate(MDS_UPDRS_III_other.8=ifelse(id %in% df_DTRs_2_pseudo$id,                              df_DTRs_2_pseudo$MDS_UPDRS_III_other.8,MDS_UPDRS_III_other.2))
+
+bl.mod.1 <- list(~MDS_UPDRS_III_other.1+RBDSQ.1+MoCA.1+MDS_UPDRS_II.1)
+tr.mod.1 <- list(treatment.1~MDS_UPDRS_III_other.1+RBDSQ.1+MoCA.1+NP1DDS.1+Duration)
+trf.mod.1 <- list(~MDS_UPDRS_III_other.1+RBDSQ.1+MoCA.1+NP1ANXS.1+NP1DDS.1
+                  +MDS_UPDRS_III_other.0+RBDSQ.0+MoCA.0+NP1ANXS.0
+                  +Duration+Age+FAM_HISTORY)
+# We remove vairalbe NP1DDS.0 for treatment-free model.
+
+DTRs.mod.1 <- DTRreg(-MDS_UPDRS_III_other.8,bl.mod.1,tr.mod.1,trf.mod.1,df_DTRs_1,method="dwols",weight="ipcw",var.estim="bootstrap")
+DTRs.mod.1
+```
+
+### DTRs Model Diagnostics
+
+#### Model Validation
+```{r}
+# Modify DTRreg function so that it can output treatment effect.
+DTRreg_ZZY <- function(outcome, blip.mod, treat.mod, tf.mod, data=NULL, method = "gest", weight = "default", var.estim="none", B = 200, M = 0, truncate = 0, verbose = FALSE, interrupt = FALSE, treat.range = NULL, missing = "default", interactive = FALSE, treat.mod.man = NULL, type = "DTR") {
+  # if interactive mode chosen, build standardized input from user input
+  if (interactive==TRUE & var.estim != "bs.quiet") {
+    cat("DTR estimation interactive mode!\n")
+    outcome <- get(readline("Enter outcome variable: "))
+    K <- readline("Enter number of stages: ")
+    for (j in 1:K) {
+      var <- c()
+      new.var <- ""
+      cat("Enter each stage",j,"blip covariate (type STOP when done)\n")
+      while (new.var != "STOP") {
+        new.var <- readline(": ")
+        if (new.var != "STOP") {var <- append(var,new.var)}
+      }
+      # convert input to formula form
+      if (length(var) == 0) {var <- "1"}
+      if (length(var) == 1) {blip.mod[[j]] <- paste("~",var)}
+      else {blip.mod[[j]] <- paste("~",paste(var,collapse="+"))}
+      cat("Stage",j,"blip model:",blip.mod[[j]],"\n")
+      blip.mod[[j]] <- as.formula(blip.mod[[j]])
+    }
+    for (j in 1:K) {
+      var <- c()
+      new.var <- ""
+      cat("Enter each stage",j,"treatment-free covariate (type STOP when done)\n")
+      while (new.var != "STOP") {
+        new.var <- readline(": ")
+        if (new.var != "STOP") {var <- append(var,new.var)}
+      }
+      if (length(var) == 0) {var <- "1"}
+      if (length(var) == 1) {tf.mod[[j]] <- paste("~",var)}
+      else {tf.mod[[j]] <- paste("~",paste(var,collapse="+"))}
+      cat("Stage",j,"treatment-free model:",tf.mod[[j]],"\n")
+      tf.mod[[j]] <- as.formula(tf.mod[[j]])
+
+    }
+    for (j in 1:K) {
+      var <- c()
+      new.var <- ""
+      cat("Enter stage",j,"treatment variable\n")
+      out <- readline(": ")
+      cat("Enter each stage",j,"treatment model covariate (type STOP when done)\n")
+      while (new.var != "STOP") {
+        new.var <- readline(": ")
+        if (new.var != "STOP") {var <- append(var,new.var)}
+      }
+      if (length(var) == 0) {var <- "1"}
+      if (length(var) == 1) {treat.mod[[j]] <- paste(out,"~",var)}
+      else {treat.mod[[j]] <- paste(out,"~",paste(var,collapse="+"))}
+      cat("Stage",j,"treatment model:",treat.mod[[j]],"\n")
+      treat.mod[[j]] <- as.formula(treat.mod[[j]])
+    }
+    method <- readline("Dynamic WOLS (dwols), G-estimation (gest), or Q-learning (qlearn)?\n> ")
+    var.estim <- readline("Variance estimation: none, bootstrap or sandwich?\n> ")
+  }
+  obj <- list()
+  # checking input validity
+  try(match.arg(method,c("dwols","gest","qlearn")))
+  try(match.arg(var.estim,c("none","bootstrap","sandwich","bs.quiet")))
+  # if q-learning selected, then set method to dwols and define qlearn to 1 for later
+  qlearn <- 0
+  if (method == "qlearn") {
+    method <- "dwols"
+    qlearn <- 1
+  }
+  if (var.estim == "sandwich" & method == "dwols") {stop("Sandwich variance estimation only available with G-estimation.\n")}
+  if (class(treat.mod) == "formula") {treat.mod <- list(treat.mod); blip.mod <- list(blip.mod); tf.mod <- list(tf.mod)}
+  if (length(treat.mod) != length(blip.mod) | length(treat.mod) != length(tf.mod)) {stop("-treat.mod-, -blip.mod- and -tf.mod- must all have same length.")}
+  if (truncate < 0 | truncate > 0.5) {stop("-truncate- must lie between 0 and 0.5.")}
+  # infer stages from treat.mod
+  K <- length(treat.mod)
+  obj$K <- K
+  # if no data set, create one from the models
+  if (is.null(data)) {
+    # form list of variables
+    model.list <- c(blip.mod, tf.mod, treat.mod)
+    # extract variables: note we drop any intercept-only terms
+    data <- cbind(outcome, do.call('cbind', lapply(model.list[which(model.list != '~1')], get_all_vars)))
+    # remove duplicates
+    data <- data[!duplicated(lapply(data,summary))]
+    obj$outcome <- outcome
+  } else {
+        if (var.estim == 'bs.quiet') {
+    obj$outcome <- outcome
+	} else {
+    obj$outcome <- eval(substitute(outcome),envir=data)
+	}
+  }
+  # make sure data is a data frame (can't be a matrix)
+  data <- data.frame(data)
+  rownames(data) <- seq(1:nrow(data))
+  obj$data <- data
+
+  obj$blip.mod <- blip.mod
+  obj$treat.mod <- treat.mod
+  obj$tf.mod <- tf.mod
+  Y <- obj$outcome
+  if (any(is.na(Y))) {
+    stop("Missing values in the outcome are not allowed.")
+  }
+  obj$obs.Y <- Y
+  obj$blip.list <- obj$psi <- obj$covmat <- list()
+  drop <- c()
+  N <- length(Y)
+  keep <- c(1:N)
+  remove <- rep(0,N)
+  # work in stages starting from final stage (K)
+  for (j in K:1) {
+    # store current outcome for use if missingness occurs
+    Y.orig <- Y
+    # get data: Hpsi = blip, Hbeta = treatment-free, Halpha = treatment
+    A <- model.response(model.frame(treat.mod[[j]],data, na.action='na.pass'))
+    Hpsi <- model.matrix(blip.mod[[j]],model.frame(blip.mod[[j]],data, na.action='na.pass'))
+    Hbeta <- model.matrix(tf.mod[[j]],model.frame(tf.mod[[j]],data, na.action='na.pass'))
+    Halpha <- model.matrix(treat.mod[[j]],model.frame(treat.mod[[j]],data, na.action='na.pass'))
+    # list of treatment variables
+    treat.var <- all.vars(treat.mod[[j]])[1]
+    # store blip variable names for output
+    obj$blip.list[[j]] <- colnames(Hpsi)
+    # missing data: identify if missing in Hpsi, Hbeta, Halpha or A; drop and store sample size
+    if (missing == "default" | missing == "ipcw") {
+      # pi = vector weights for IPCW
+      pi <- rep(1,N)
+      # drop adds to current drop so future missingness is accommodated
+      new.drop <- which(apply(is.na(cbind(A,Hpsi,Hbeta,Halpha)),1,any))
+      # remove keeps track of which patients were dropped at what stage
+      if(j==K) remove[new.drop] <- j
+      if(j!=K) {
+        dropk <- new.drop[!(new.drop %in% drop)]
+        remove[dropk] <- j
+      }
+      drop <- unique(new.drop,drop)
+      # if missing, later than stage 1, and requested, calculate IPCW
+      if (length(new.drop) > 0 & missing == "ipcw" & j > 1) {
+        # this works on 'keep' from previous stage: full population who *could* be missing now
+        Miss <- rep(1,N)
+        Miss[new.drop] <- 0
+        Miss <- Miss[keep]
+        # build full history from all previous stages
+        H.list <- unique(c(unlist(sapply(blip.mod[(j-1):1],all.vars)),unlist(sapply(tf.mod[(j-1):1],all.vars)),unlist(sapply(treat.mod[(j-1):1],all.vars))))
+        H <- data.matrix(data[,which(colnames(data) %in% H.list)])
+        H <- H[keep,]
+        pi[which(!apply(is.na(H),1,any))] <- 1 - fitted(glm(Miss~.,data=as.data.frame(H), family = 'binomial'))
+        obj$ipcw[[j]] <- 1/pi
+      }
+
+	if (missing == 'ipcw') {
+	keep <- c(1:N)
+      keep <- keep[!(keep %in% new.drop)]				
+	} else {
+      keep <- keep[!(keep %in% drop)]		
+	}
+
+      # only work with those we want to kep at this stage
+      pi <- pi[keep]
+      A <- A[keep]
+      Hpsi <- Hpsi[keep,]
+      Hbeta <- Hbeta[keep,]
+      Halpha <- Halpha[keep,]
+      Y <- Y[keep]
+    }
+    # force matrices in case intercept-only models
+    Hpsi <- as.matrix(Hpsi)
+    Hbeta <- as.matrix(Hbeta)
+    Halpha <- as.matrix(Halpha)
+    obj$n[[j]] <- length(keep)
+    n <- length(Y)
+    # check if treatments are binary, if not, and dWOLS selected, abort
+    A.bin <- as.numeric(length(unique(A)) <= 2)
+    if (A.bin == 0 & method %in% c("dwols","dWOLS")) {
+      stop("Non-binary treatment only suitable for G-estimation analysis.\n")
+    }
+    # if binary and not 0/1, recode (and print warning)
+    if (A.bin & !all(unique(A) %in% c(0,1))) {
+      A <- ifelse(A==min(A),0,1)
+      # suppress output if bootstrapping
+      if (var.estim!="bs.quiet") {
+        cat("Warning: stage",j,"treatment recoded to 0/1.\n")
+      }
+    }
+    # if no treat.range but outcome non-binary, set treat range to min/max of A
+    if (A.bin == 0 & is.null(treat.range)) {
+      treat.range <- c(min(A),max(A))
+      if (var.estim!="bs.quiet") {
+        cat("Warning: no treatment range specified, [min,max] of observed treatment used.\n")
+      }
+    }
+    obj$treat.range[[j]] <- treat.range
+    # treatment model: if binary logistic, if non-binary linear
+    if (A.bin == 1) {
+      obj$cts[[j]] <- "bin"
+      # note that if user-specified we take specified P(A = 1) instead
+      if (class(treat.mod.man) == "list") {
+        if (class(treat.mod.man[[j]]) != "formula") {
+          Ahat <- treat.mod.man[[j]]
+        }
+      } else {
+        alpha <- glm(A~Halpha,binomial)
+        obj$treat.mod.fitted[[j]] <- alpha
+        Ahat <- fitted(alpha)
+      }
+    } else {
+      alpha <- lm(treat.mod[[j]],data)
+      obj$treat.mod.fitted[[j]] <- alpha
+      Ahat <- fitted(alpha)
+      if (treat.var %in% colnames(Hpsi)){
+        # continuous with quadratic blip
+        obj$cts[[j]] <- "cts.q"
+      } else {
+        # continuous with linear blip
+        obj$cts[[j]] <- "cts.l"
+      }
+    }
+    # if dWOLS
+    if (method == "dwols") {
+      # weights
+      if (is.function(weight) == FALSE) {
+        w <- abs(A - Ahat)
+      } else {
+        # weight function specified for pi = 1, therefore
+        w <- weight(Ahat)
+        w[A == 0] <- w[A==0]*Ahat[A==0]/(1-Ahat[A==0])
+      }
+      # if q-learning selected, set all weights to 1
+      if (qlearn == 1) {w <- rep(1,n)}
+      # update with IPCW
+      w <- w*pi
+      # blip parameter estimates extracted via dimensions of Hbeta and Hpsi
+      est <- solve(t(cbind(Hbeta,A*Hpsi))%*%cbind(w*Hbeta,w*A*Hpsi)) %*% t(cbind(Hbeta,A*Hpsi)) %*% (w*Y)
+      psi <- est[(dim(Hbeta)[2]+1):(dim(Hbeta)[2]+dim(Hpsi)[2])]
+      beta <- est[1:dim(Hbeta)[2]]
+    }
+    # g-estimation
+    if (method == "gest") {
+      Hd <- cbind(Hbeta,A*Hpsi)
+      if (A.bin == 1) {
+        # binary treatment
+        Hw <- cbind(Hbeta,Hpsi*(A - Ahat)*pi)
+      } else {
+        # continuous treatment, requires some fiddly cleanup
+        # ***INPUT CLEANUP STARTS
+        # separate Hpsi into A/not-A components (if applicable)
+        p1.list <- p2.list <- c()
+        for (p.var in colnames(Hpsi)) {
+          # note there may be interaction terms, so have to separate on :
+          if (treat.var %in% strsplit(p.var,split=":")[[1]]) {
+            p2.list <- append(p2.list,which(colnames(Hpsi) == p.var))} 						else {
+              p1.list <- append(p1.list,which(colnames(Hpsi) == p.var))
+            }
+        }
+        Hpsi1 <- as.matrix(Hpsi[,p1.list])
+        # if we have A terms need to extract what they're multiplied with
+        # 3 options: A by itself, or an A interaction as :A or A:
+        psi2.list <- c()
+        for (p.var in colnames(Hpsi)[p2.list]) {
+          # if p.var is treat.var, we do nothing (assumed intercept term)
+          if (p.var != treat.var) {
+            # if variable starts with A: then replace with nothing
+            if (strsplit(p.var,split=":")[[1]][1] == treat.var) {psi2.list <- append(psi2.list,paste(strsplit(p.var,split=":")[[1]][-1],collapse=":"))}
+            # if variable ends with :A then replace with nothing
+            if (tail(strsplit(p.var,split=":")[[1]],n=1) == treat.var) {psi2.list <- append(psi2.list,paste(head(strsplit(p.var,split=":")[[1]],n=-1),collapse=":"))}
+            # if variable has :A: in the middle, replace this with :
+            if (strsplit(p.var,split=paste(":",treat.var,":",sep=""))[[1]][1] != p.var) {psi2.list <- append(psi2.list,paste(strsplit(p.var,split=paste(":",treat.var,":",sep=""))[[1]],collapse=":"))}
+          }
+        }
+        # turn psi2.list into a model so we can get a new data frame
+        # intercept always implied
+        if (length(psi2.list) > 0) {psi2.mod <- paste("~1+",paste(psi2.list,collapse="+")); obj$b.list[[j]] <- psi2.list} else {psi2.mod <- "~1"}
+        if (length(p1.list) > 1) {psi1.mod <- paste("~1+",paste(colnames(Hpsi)[p1.list[-1]],collapse="+"))} else {psi1.mod <- "~1"}
+        # store both components of the blip model for prediction function
+        obj$blip.list.cts[[j]] <- c(psi1.mod,psi2.mod)
+        Hpsi2 <- model.matrix(as.formula(psi2.mod),data)
+        # ***INPUT CLEANUP ENDS
+        A2 <- A^2
+        A2hat <- (summary(alpha)$sigma)^2 + Ahat^2
+        # if no A^2 terms, just use Hpsi
+        ifelse(length(p2.list) > 0,Hw <- cbind(Hbeta,Hpsi1*(A-Ahat),Hpsi2*(A2-A2hat)),Hw <- cbind(Hbeta,Hpsi*(A-Ahat)))
+      }
+      # get estimates
+      est <- solve(t(Hw)%*%Hd) %*% t(Hw) %*% (Y)
+      # blip parameters
+      psi <- est[(dim(Hbeta)[2]+1):(dim(Hbeta)[2]+dim(Hpsi)[2])]
+      # non-blip parameters
+      beta <- est[1:dim(Hbeta)[2]]
+    }
+    # use estimates to identify optimal treatments
+    # if treatment is binary:
+    if (A.bin == 1) {opt <- as.numeric(Hpsi %*% psi > 0)}
+    # if treatment is continuous
+    if (A.bin == 0) {
+      if (obj$cts[[j]] == "cts.l") {
+        # if no treatment term within blip, then max/min based on sign
+        opt <- as.numeric(Hpsi %*% psi > 0)*max(treat.range) + as.numeric(Hpsi %*% psi <= 0)*min(treat.range)
+      } else {
+        # otherwise optimal is found by maximizing wrt A, need to check second derivative
+        # if sign(Hpsi2 %*% psi2) < 0, then blip is maxed by setting first derivative to zero
+        # otherwise evaluate at max/min or treatment range and pick the larger
+        # dif is blip(minA) - blip(maxA); so if negative take max, otherwise min
+        sec.deriv <- Hpsi2 %*% psi[(dim(Hpsi1)[2]+1):length(psi)]
+        dif <- sign(min(treat.range)*(Hpsi1 %*% psi[1:(dim(Hpsi1)[2])] + min(treat.range)*Hpsi2 %*% psi[(dim(Hpsi1)[2]+1):length(psi)]) - max(treat.range)*(Hpsi1 %*% psi[1:(dim(Hpsi1)[2])] + max(treat.range)*Hpsi2 %*% psi[(dim(Hpsi1)[2]+1):length(psi)]))
+        opt <- as.numeric(sec.deriv < 0)*(-(Hpsi1 %*% psi[1:(dim(Hpsi1)[2])])/(2*Hpsi2 %*% psi[(dim(Hpsi1)[2]+1):length(psi)])) + as.numeric(sec.deriv >= 0)*(as.numeric(dif >= 0)*min(treat.range) + as.numeric(dif < 0)*max(treat.range))
+      }
+      # make sure opt is between limits
+      opt <- pmin(pmax(opt,min(treat.range)),max(treat.range))
+    }
+    # ensure opt is in vector form
+    opt <- as.vector(opt)
+    # store estimates, optimal treatments and blip parameters
+    obj$beta[[j]] <- beta
+    obj$psi[[j]] <- psi
+    obj$opt.treat[[j]] <- opt
+    # Sandwich variance estimator done stage-by-stage
+    if (var.estim == "sandwich") {
+      D <- A - Ahat
+      # HD: what precedes the (Y-gamma-beta) term in the est eq.
+      if (method == "gest") {HD <- Hpsi*(A-Ahat)}
+      if (method == "dwols") {HD <- A*Hpsi*abs(A-Ahat)}
+      # residuals are the (Y-gamma-beta) residuals
+      residuals <- as.vector(Y - ((A*Hpsi)%*%psi) - Hbeta%*%beta)
+      # estimating equation = (Y - gamma - E[Y - gamma|H])*(A - Ahat)*Hpsi
+      U <- residuals * HD
+      # dU/dpsi:
+      M <- (1/n) * -crossprod(HD, A * Hpsi)
+      # if binary
+      if (A.bin == 1) {
+        score.alpha <- D * Halpha
+        score.varsig <- residuals * Hbeta
+        U.adj <- U
+        # dT.dalpha = Ahat(1-Ahat) Halpha Halpha
+        dT.dalpha <- (1/n)*(-crossprod(Ahat*(1-Ahat)*Halpha, Halpha))
+        dU.dalpha <- (1/n)*(-crossprod(Ahat*(1-Ahat)*residuals*Hpsi,Halpha))
+        U.adj <- U.adj - t(dU.dalpha%*%solve(dT.dalpha) %*% t(score.alpha))
+        # now with respect to beta
+        dT.dvarsig <- (1/n) * (-crossprod(Hbeta))
+        dU.dvarsig <- (1/n) * (-crossprod(HD, Hbeta))
+        U.adj <- U.adj-t(dU.dvarsig%*%solve(dT.dvarsig)%*%t(score.varsig))
+        if (j == K) {U.store <- M.store <- deriv.regret.store <- list()}
+        U.store[[j]] <- matrix(nrow=N,ncol=dim(U)[2])
+        deriv.regret.store[[j]] <- matrix(nrow=N,ncol=dim(Hpsi)[2])
+        U.store[[j]][keep,] <- U
+        M.store[[j]] <- M
+        # derivative of regrets wrt psi
+        deriv.regret.store[[j]][keep,] <- (opt - A) * Hpsi
+        if (j < K) {
+          for (l in (j+1):K) {
+            dU2.dpsi2 <- -M.store[[l]]
+            dU1.dpsi2<-(1/n)*(crossprod(HD,deriv.regret.store[[l]][keep,]))
+            U.adj <- U.adj - t(dU1.dpsi2 %*% solve(dU2.dpsi2) %*% t(U.store[[l]][keep,]))
+          }
+        }
+      }
+      # if linear, then score = (1/s^2) * (A - Ahat)*Halpha
+      if (A.bin == 0) {
+        score.alpha <- D * Halpha
+        score.varsig <- residuals * Hbeta
+        U.adj <- U
+        # dT.dalpha = -1/s^2 t(Halpha) * Halpha
+        dT.dalpha <- (1/n) * (-crossprod(Halpha,Halpha))
+        # dU/dalpha = (y - gamma - G)*Hpsi*[...], if no A^2 term, [...] is -Halpha
+        # A^2 term then also -2*Halpha*alpha-hat - 2/(n-2)*sum(Halpha*(Ahat-A))
+        # N.B. this slight ugliness is because of the var(A-hat|...) term
+        if (obj$cts[[j]] == "cts.l") {
+          dU.dalpha <- (1/n) * (-crossprod(residuals * Hpsi, Halpha))
+        } else {
+          Hpsi.cts <- cbind(Hpsi1,Hpsi2*2*(Ahat + (1/(dim(Hbeta)[1]-2))*sum(Ahat-A)))
+          dU.dalpha <- (1/n) * (-crossprod(residuals * Hpsi.cts,Halpha))
+        }
+        U.adj <- U.adj - t(dU.dalpha %*% solve(dT.dalpha) %*% t(score.alpha))#
+        dT.dvarsig <- (1/n) * (-crossprod(Hbeta))
+        dU.dvarsig <- (1/n) * (-crossprod(HD, Hbeta))
+        U.adj <- U.adj - t(dU.dvarsig %*% solve(dT.dvarsig) %*% t(score.varsig))
+        # storage for earlier intervals
+        if (j == K) {U.store <- M.store <- deriv.regret.store <- list()}
+        U.store[[j]] <- U
+        M.store[[j]] <- M
+        # derivative of regrets wrt psi, depends on whether A term in reg
+        if (obj$cts[[j]] == "cts.l") {deriv.regret.store[[j]] <- (opt - A) * Hpsi}
+        if (obj$cts[[j]] == "cts.q") {deriv.regret.store[[j]] <- opt*(cbind(Hpsi1,opt*Hpsi2))-A*Hpsi}
+        if (j < K) {
+          for (l in (j+1):K) {
+            dU2.dpsi2 <- -M.store[[l]]
+            dU1.dpsi2 <- (1/n) * (crossprod(HD, deriv.regret.store[[l]]))
+            U.adj <- U.adj - t(dU1.dpsi2 %*% solve(dU2.dpsi2) %*% t(U.store[[l]]))
+          }
+        }
+      }
+      IF <- t(solve(M, t(U.adj)))
+      Sigma <- (1/n) * var(IF)
+      obj$covmat[[j]] <- Sigma
+    }
+    # update pseudo-Y by adding regret, note that if missing we take Y = Y.orig
+    if (obj$cts[[j]] %in% c("cts.l","bin")) {
+      # for linear blip
+      Y.orig[keep] <- Y.orig[keep] + (as.numeric(type == "DTR")*(opt) - A)*(Hpsi%*%psi)
+      Y.orig[drop] <- Y.orig[drop]
+      obj$regret[[j]] <- (opt - A)*(Hpsi%*%psi)
+    } else {
+      # for quadratic blip
+      Y.orig[keep] <- Y.orig[keep] + as.numeric(type == "DTR")*(opt)*(Hpsi1 %*% psi[1:length(p1.list)] + as.numeric(type == "DTR")*(opt)*Hpsi2 %*% psi[(length(p1.list)+1):(length(psi))]) - A*(Hpsi%*%psi)
+      Y.orig[drop] <- Y.orig[drop]
+      obj$regret[[j]] <- opt*(Hpsi1 %*% psi[1:length(p1.list)] + opt*Hpsi2 %*% psi[(length(p1.list)+1):(length(psi))]) - A*(Hpsi%*%psi)
+    }
+    Y <- Y.orig
+    # fitted values at each stage
+    Y.fit <- Hbeta %*% beta + A*(Hpsi %*% psi)
+    k <- j
+    while (k < K) {
+      k <- k + 1
+      Y.fit[which(rownames(obj$regret[[k]])%in% keep)] <- Y.fit[which(rownames(obj$regret[[k]])%in% keep)] - obj$regret[[k]][which(rownames(obj$regret[[k]])%in% keep)] # correctly use keep indicator
+    }
+    obj$fitted[[j]] <- Y.fit
+  }
+  # keep track of which patients are removed at which stage
+  obj$remove <- remove
+  # optimal outcome according to blip estimates is current pseudo-Y
+  obj$opt.Y <- Y
+  obj$type <- type
+  # standard errors
+  if (var.estim=="bootstrap") {
+    if (M == 0) {M <- nrow(data)}
+    # note time for progress reports
+    ptm <- proc.time()
+    psi.boot <- list()
+    te <- rep(0,B)
+    # continue indicator
+    cont <- "u"
+    for (i in 1:B) {
+      b.sample <- sample(1:M, replace=TRUE)
+      data.boot <- data[b.sample,]
+      # set outcome vector manually to avoid dependency on input format
+      outcome.boot <- Y[b.sample]
+      psi.boot[[i]] <- DTRreg(outcome.boot, blip.mod, treat.mod, tf.mod, data.boot, method, var.estim="bs.quiet", verbose=verbose,treat.mod.man=treat.mod.man)$psi
+      
+      # CHANGE!
+      ZZY <- data.matrix(data[,which(colnames(data) %in% unique(c(unlist(sapply(blip.mod,all.vars)))))])
+      ZZY <- cbind(rep(1,dim(data)[1]),ZZY)
+      te[i] <- mean(ZZY %*% psi.boot[[i]][[1]],na.rm=T)
+      
+      # if verbose, display ETA and give option to abort
+      if (verbose == T & i >= 10) {
+        # only display if projected > 30s, then only display every 30s
+        eta <- (B-i)*((proc.time() - ptm)[3]/i)
+        # if very long (> 10 mins) give option to abort but if ignored continue
+        if (i > 50 & eta > 600 & cont != "y" & interrupt == T) {
+          cont <- readline(paste("Estimated run time",round(eta/60),"minutes. Continue? y/n: "))
+          if (cont == "n" | cont == "no" | cont == "NO") {stop("Aborted.\n")} else {cont <- "y"}
+        }
+        if (i == 10) {last <- eta+31}
+        if (eta > 30 & eta < (last-30)) {
+          cat("Approximately",round(eta),"seconds remaining.\n")
+          last <- eta
+        }
+      }
+    }
+    psi.boot <- do.call(function(...) mapply(rbind, ..., SIMPLIFY=FALSE), psi.boot)
+    # if requested, truncate estimates based on specified percentile
+    if (truncate > 0) {
+      for (j in 1:K) {
+        psi.boot[[j]] <- apply(psi.boot[[j]],2,DTRreg.trunc,truncate)
+      }
+    }
+    covmat <- lapply(psi.boot, var)
+    obj$covmat <- covmat
+    obj$psi.boot <- psi.boot
+    obj$te <- te
+  }
+  # if variance estimated (and we're not currently bootstrapping, estimate non-regularity
+  if (!(var.estim %in% c("none","bs.quiet")) & A.bin == 1) {
+    for (j in K:1) {
+      Hpsi <- model.matrix(blip.mod[[j]],data)
+      # lower/upper limits on psi
+      psi.l <- obj$psi[[j]] - 1.96*sqrt(diag(obj$covmat[[j]]))
+      psi.u <- obj$psi[[j]] + 1.96*sqrt(diag(obj$covmat[[j]]))
+      # look at max/min value of blip based on sign of covariates and max/min of parameter CIs
+      Hpsi.p <- apply(Hpsi,c(1,2),FUN=function(x) max(x,0))
+      Hpsi.n <- apply(Hpsi,c(1,2),FUN=function(x) min(x,0))
+      # lower blip is positive values * lower CI + negative values * upper CI
+      blip.l <- Hpsi.p %*% psi.l + Hpsi.n %*% psi.u
+      blip.u <- Hpsi.p %*% psi.u + Hpsi.n %*% psi.l
+      obj$nonreg[j] <- sum(blip.l < 0 & blip.u > 0)/dim(Hpsi)[1]
+    }
+  }
+  # return
+  class(obj) <- "DTRreg"
+  obj
+}
+```
+
+Two ways to analyze, one is by SD of each run, another is by analyzing every bootstrap in one run. For more details, refer to *Model Assessment in Dynamic Treatment Regimen Estimation via Double Robustness* and *Model validation and selection for personalized medicine using dynamic-weighted ordinary least squares* (both by Wallace).
+
+##### Use all runs (treatment effects)
+```{r}
+# start the clock
+ptm <- proc.time()
+# DTRreg_ZZY for a given treatment model t and treatment-free model f:
+DTR <- function(data,t,f,b) {
+	n <- dim(data)[1]
+
+	# treatment model, intercept only model was originally used to increase variance
+	if (t == 1) {TR <- list(treatment.4~1)}
+	if (t == 2) {TR <- list(treatment.4~MDS_UPDRS_III_other.4+RBDSQ.4+MoCA.4)}
+	if (t == 3) {TR <- list(treatment.4~MDS_UPDRS_III_other.4+RBDSQ.4+MoCA.4+NP1DDS.4+Duration)}
+	# treatment-free model
+	if (f == 1) {TF <- list(~1)}
+	if (f == 2) {TF <- list(~MDS_UPDRS_III_other.4+RBDSQ.4+MoCA.4+NP1ANXS.4
+	                          +MDS_UPDRS_III_other.0+RBDSQ.0+MoCA.0+NP1ANXS.0
+	                          +Duration)}
+	if (f == 3) {TF <- list(~MDS_UPDRS_III_other.4+RBDSQ.4+MoCA.4+NP1ANXS.4
+	                          +MDS_UPDRS_III_other.0+RBDSQ.0+MoCA.0+NP1ANXS.0
+	                          +Duration+Age+FAM_HISTORY)}
+	# blip model
+	B <- list(~MDS_UPDRS_III_other.4+RBDSQ.4+MoCA.4+MDS_UPDRS_II.4)
+
+	# DTRreg
+	out <- DTRreg_ZZY(-MDS_UPDRS_III_other.8,blip.mod=B,treat.mod=TR,tf.mod=TF,
+	              data=data,B=b,weight="ipcw",var.estim="bootstrap")
+	out
+}
+
+# bootstrap on a single example
+run <- 100 # can set smaller
+boot <- 200
+# for storage
+p.boot <- matrix(nrow=run,ncol=6)
+boot.pick.t <- boot.pick.f <- c()
+Data <- df_DTRs_4
+n <- dim(Data)[1]
+
+set.seed(0612)
+for (r in 1:run) {
+	c <- 0
+	psi0 <- psi1 <- psi2 <- psi3 <- psi4 <- te <- matrix(nrow=9,ncol=2+boot)
+	# for each treatment model
+	for (t in 1:3) {
+		# for each treatment-free model
+		for (f in 1:3) {
+			c <- c+1
+			psi0[c,1] <- psi1[c,1] <- psi2[c,1] <- psi3[c,1] <- psi4[c,1] <- te[c,1] <- t
+			psi0[c,2] <- psi1[c,2] <- psi2[c,2] <- psi3[c,2] <- psi4[c,2] <- te[c,2] <- f
+			# take bootstrap sample, analyze, and store results
+			out <- DTR(Data,t,f,boot)
+			for (b in 1:boot) {
+				psi0[c,2+b] <- out$psi.boot[[1]][,1][b]
+				psi1[c,2+b] <- out$psi.boot[[1]][,2][b]
+				psi2[c,2+b] <- out$psi.boot[[1]][,3][b]
+				psi3[c,2+b] <- out$psi.boot[[1]][,4][b]
+				psi4[c,2+b] <- out$psi.boot[[1]][,5][b]
+				te[c,2+b] <- out$te[b]
+			}
+		}
+	}
+	
+	## ANOVA on treatment effects for fixed treatment/treatment-free models
+	p.te <- c()
+	for (t in 1:3) {
+		temp <- data.frame(c(rep("F1",boot),rep("F2",boot),rep("F3",boot)),as.vector(t(subset(te,subset=(te[,1] == t))[,3:(2+boot)])))
+		colnames(temp) <- c("f","est")
+		p.te <- append(p.te,summary(aov(est~f,data=temp))[[1]]$"Pr(>F)"[1])
+	}
+	for (f in 1:3) {
+		temp <- data.frame(c(rep("T1",boot),rep("T2",boot),rep("T3",boot)),as.vector(t(subset(te,subset=(te[,2] == f))[,3:(2+boot)])))
+		colnames(temp) <- c("t","est")
+		p.te <- append(p.te,summary(aov(est~t,data=temp))[[1]]$"Pr(>F)"[1])
+	}
+	# store p-values (one row, one run)
+	p.boot[r,] <- p.te
+
+	## picking based on smallest standard deviation of te across bootstraps
+	t.fun <- cbind(apply(subset(te,subset=(te[,1]==1))[,3:(2+boot)],2,sd),apply(subset(te,subset=(te[,1]==2))[,3:(2+boot)],2,sd),apply(subset(te,subset=(te[,1]==3))[,3:(2+boot)],2,sd))
+	f.fun <- cbind(apply(subset(te,subset=(te[,2]==1))[,3:(2+boot)],2,sd),apply(subset(te,subset=(te[,2]==2))[,3:(2+boot)],2,sd),apply(subset(te,subset=(te[,2]==3))[,3:(2+boot)],2,sd))
+	t.boot.pick <- table(apply(t.fun,1,which.min))
+	f.boot.pick <- table(apply(f.fun,1,which.min))
+	# identify which model 'wins' the most based on smallest SDs, picking at random if a tie (one value, one run)
+	if (length(which(t.boot.pick==max(t.boot.pick)))==1) {
+		boot.pick.t <- append(boot.pick.t,which(t.boot.pick==max(t.boot.pick)))
+	} else {
+		boot.pick.t <- append(boot.pick.t,sample(which(t.boot.pick==max(t.boot.pick)),1))
+	}
+	if (length(which(f.boot.pick==max(f.boot.pick)))==1) {
+		boot.pick.f <- append(boot.pick.f,which(f.boot.pick==max(f.boot.pick)))
+	} else {
+		boot.pick.f <- append(boot.pick.f,sample(which(f.boot.pick==max(f.boot.pick)),1))
+	}
+}
+colnames(p.boot) <- c("T1","T2","T3","F1","F2","F3") # careful
+
+## report results
+reject <- function(x) {sum(x < 0.05)}
+cat("Bootstrap picking based on ANOVA:\n")
+cat("Rejections of null for treatment:",apply(p.boot[,1:3],2,reject)/run,"\n")
+cat("Rejections of null for treatment-free:",apply(p.boot[,4:6],2,reject)/run,"\n")
+## first 3 columns test treatment model, second 3 test treatment-free model
+cat("Bootstrap picking based on standard deviation:\n")
+cat("Correct pick (treatment):",sum(boot.pick.t == 1)/length(boot.pick.t),"\n")
+cat("Correct pick (treatment-free):",sum(boot.pick.f == 3)/length(boot.pick.f),"\n")
+
+# stop the clock
+cat(paste("Time (s):",(proc.time() - ptm)[3],"\n"))
+```
+We would like to choose models with the smallest rejection value (correspond to the largest p-value, think why we choose them), there are contradictions between two different methods, this should be analyzed future.
+
+##### Use Last Run (treatment effects + blip estimators)
+```{r}
+## pick models based on lowest standard deviation of parameter estimates and treatment effects in last run:
+## for each fixed t (column 1) and fixed f (column 2) we generate the sd
+psi0.sd.t <- psi1.sd.t <- psi0.sd.f <- psi1.sd.f <- te.sd.t <- te.sd.f <- matrix(ncol=3,nrow=boot)
+for (t in 1:3) {
+	temp <- subset(psi0,subset=(psi0[,1] == t))[,3:(boot+2)]
+	psi0.sd.t[,t] <- apply(temp,2,sd)
+	temp <- subset(psi1,subset=(psi1[,1] == t))[,3:(boot+2)]
+	psi1.sd.t[,t] <- apply(temp,2,sd)
+	temp <- subset(te,subset=(te[,1] == t))[,3:(boot+2)]
+	te.sd.t[,t] <- apply(temp,2,sd)
+}
+for (f in 1:3) {
+	temp <- subset(psi0,subset=(psi0[,2] == f))[,3:(boot+2)]
+	psi0.sd.f[,f] <- apply(temp,2,sd)
+	temp <- subset(psi1,subset=(psi1[,2] == f))[,3:(boot+2)]
+	psi1.sd.f[,f] <- apply(temp,2,sd)
+	temp <- subset(te,subset=(te[,2] == f))[,3:(boot+2)]
+	te.sd.f[,f] <- apply(temp,2,sd)
+}
+
+psi0.pick.t <- psi1.pick.t <- te.pick.t <- psi0.pick.f <- psi1.pick.f <- te.pick.f <- c()
+psi0.pick.t <- apply(psi0.sd.t,1,which.min)
+psi1.pick.t <- apply(psi1.sd.t,1,which.min)
+te.pick.t <- apply(te.sd.t,1,which.min)
+psi0.pick.f <- apply(psi0.sd.f,1,which.min)
+psi1.pick.f <- apply(psi1.sd.f,1,which.min)
+te.pick.f <- apply(te.sd.f,1,which.min)
+
+## display picking results
+cat("Picking based on treatment effect:\n")
+cat("Correct pick (treatment):",sum(te.pick.t == 1)/length(te.pick.t),"\n")
+cat("Correct pick (treatment-free):",sum(te.pick.f == 3)/length(te.pick.f),"\n")
+cat("Picking based on psi0:\n")
+cat("Correct pick (treatment):",sum(psi0.pick.t == 1)/length(psi0.pick.t),"\n")
+cat("Correct pick (treatment-free):",sum(psi0.pick.f == 3)/length(psi0.pick.f),"\n")
+cat("Picking based on psi1:\n")
+cat("Correct pick (treatment):",sum(psi1.pick.t == 1)/length(psi1.pick.t),"\n")
+cat("Correct pick (treatment-free):",sum(psi1.pick.f == 3)/length(psi1.pick.f),"\n")
+
+## plot of standard deviations for each fixed model
+# pdf("1StagePsiSDPlotsFinalWithTETemp.pdf",width=30,height=20)
+par(mfrow=c(2,3))
+par(mar=c(5.1,5.6,4.1,2.1))
+boxplot(psi0.sd.t,names=c(expression(T[1]),expression(T[2]),expression(T[3])),main=expression(psi[0]),xlab="Fixed model",ylab="SD of estimates",cex.lab=2,cex.axis=2,cex.main=2)
+boxplot(psi1.sd.t,names=c(expression(T[1]),expression(T[2]),expression(T[3])),main=expression(psi[1]),xlab="Fixed model",ylab="SD of estimates",cex.lab=2,cex.axis=2,cex.main=2)
+boxplot(te.sd.t,names=c(expression(T[1]),expression(T[2]),expression(T[3])),main="Treatment effect",xlab="Fixed model",ylab="SD of estimates",cex.lab=2,cex.axis=2,cex.main=2)
+boxplot(psi0.sd.f,names=c(expression(F[1]),expression(F[2]),expression(F[3])),main=expression(psi[0]),xlab="Fixed model",ylab="SD of estimates",cex.lab=2,cex.axis=2,cex.main=2)
+boxplot(psi1.sd.f,names=c(expression(F[1]),expression(F[2]),expression(F[3])),main=expression(psi[1]),xlab="Fixed model",ylab="SD of estimates",cex.lab=2,cex.axis=2,cex.main=2)
+boxplot(te.sd.t,names=c(expression(F[1]),expression(F[2]),expression(F[3])),main="Treatment effect",xlab="Fixed model",ylab="SD of estimates",cex.lab=2,cex.axis=2,cex.main=2)
+# dev.off()
+```
+
+#### Blip Selection: QIC Method
+
+Code are not allowed for distribution, for research purpose, please contact Prof.Wallace.
+
+B1 <- cbind(rep(1,n),MDS_UPDRS_III_other.4,RBDSQ.4,MoCA.4,MDS_UPDRS_II.4), QIC: -29369.2
+B2 <- cbind(rep(1,n),MDS_UPDRS_III_other.4,RBDSQ.4,MoCA.4), QIC: -29280.95
+B3 <- cbind(rep(1,n),MDS_UPDRS_III_other.4), QIC: -29290.19
+
+```{r}
+# Assume that all three MDS-UPDRS scores are tailing variabls
+library(DTRreg)
+
+bl.mod.4 <- list(~MDS_UPDRS_III_other.4+RBDSQ.4+MoCA.4+MDS_UPDRS_II.4)
+tr.mod.4 <- list(treatment.4~1)
+trf.mod.4 <- list(~MDS_UPDRS_III_other.4+RBDSQ.4+MoCA.4+NP1ANXS.4
+                  # +MDS_UPDRS_III_other.3+RBDSQ.3+MoCA.3+NP1ANXS.3
+                  # +MDS_UPDRS_III_other.2+RBDSQ.2+MoCA.2+NP1ANXS.2
+                  # +MDS_UPDRS_III_other.1+RBDSQ.1+MoCA.1+NP1ANXS.1
+                  +MDS_UPDRS_III_other.0+RBDSQ.0+MoCA.0+NP1ANXS.0
+                  +Duration+Age+FAM_HISTORY)
+# We remove vairalbe NP1DDS.4 due to singularity problem.
+# Seems like DTRreg cannot handle (will output error) complex multi-stage multi-variable cases, and consider that intermediate treatments are all 0, we thus remove those intermediate variables.
+# I do not add previous treatment terms in stage 1,2,3 as they are all 0 (consider carefully, PD disease cannot be stopped after beginning).
+
+DTRs.mod.4 <- DTRreg(-MDS_UPDRS_III_other.8,bl.mod.4,tr.mod.4,trf.mod.4,df_DTRs_4,method="dwols",weight="ipcw",var.estim="bootstrap")
+DTRs.mod.4
+```
+No great difference between original DTR.mod.4.
