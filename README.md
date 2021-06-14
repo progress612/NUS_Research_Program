@@ -1,6 +1,6 @@
 # NUS Research Program: Dynamic Treatment Regime in Parkinson's Disease
 
-Save some files that needed to share. Core codes are all in PD_DTRs.Rmd. After some days I will also upload my thesis about this project.
+Save some files that needed to share. Core codes are all in PD_DTRs.Rmd.
 
 ## Data Sources
 
